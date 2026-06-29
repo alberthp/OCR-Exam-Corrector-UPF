@@ -5,7 +5,7 @@ a = Analysis(
     ['omr_gui.py'],
     pathex=[],
     binaries=[('poppler_bin', 'poppler_bin')],
-    datas=[],
+    datas=[('assets', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
