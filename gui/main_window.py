@@ -26,6 +26,7 @@ class MainWindow(QMainWindow):
         self.start_screen.new_exam_requested.connect(
             lambda: self.stack.setCurrentWidget(self.new_exam_screen))
         self.start_screen.review_requested.connect(self._go_to_review)
+        self.start_screen.exit_requested.connect(self.close)
 
         self.new_exam_screen.back_requested.connect(
             lambda: self.stack.setCurrentWidget(self.start_screen))

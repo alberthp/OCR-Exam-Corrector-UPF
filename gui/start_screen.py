@@ -1,16 +1,26 @@
 """Landing screen: choose between evaluating a new exam or reviewing existing results."""
 
 import os
+import sys
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QFileDialog, QMessageBox,
 )
 
 import omr_correct as omr
 
-APP_VERSION = "1.0"
+# Bump this with each meaningful change to the app.
+APP_VERSION = "1.1"
 APP_AUTHOR = "Albert Hernansanz (with Claude)"
+APP_EMAIL = "albert.hernansanz@upf.edu"
+
+# sys._MEIPASS is where PyInstaller extracts bundled data at runtime (set for
+# both --onefile and --onedir); falling back to the source tree when not
+# frozen. Project root is two levels up from this file (gui/start_screen.py).
+_PROJECT_ROOT = getattr(sys, '_MEIPASS', os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+LOGO_PATH = os.path.join(_PROJECT_ROOT, 'assets', 'upf_logo.png')
 
 
 class StartScreen(QWidget):
@@ -18,6 +28,7 @@ class StartScreen(QWidget):
 
     new_exam_requested = Signal()
     review_requested = Signal(dict)  # run_state, loaded from a review_cache.pkl
+    exit_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -47,9 +58,25 @@ class StartScreen(QWidget):
 
         layout.addStretch()
 
-        footer = QLabel(f"v{APP_VERSION}  -  {APP_AUTHOR}")
+        logo_pixmap = QPixmap(LOGO_PATH)
+        if not logo_pixmap.isNull():
+            logo_label = QLabel()
+            # Modest size: cap the height, scale width to match (logo is wide
+            # and white-on-transparent, designed for a dark background).
+            scaled = logo_pixmap.scaledToHeight(70, Qt.SmoothTransformation)
+            logo_label.setPixmap(scaled)
+            logo_label.setContentsMargins(0, 0, 0, 16)
+            layout.addWidget(logo_label, alignment=Qt.AlignHCenter)
+
+        footer = QLabel(f"v{APP_VERSION}  -  {APP_AUTHOR}  -  {APP_EMAIL}")
         footer.setStyleSheet("font-size: 11px; color: #888888;")
         layout.addWidget(footer, alignment=Qt.AlignHCenter)
+
+        exit_btn = QPushButton("Exit")
+        exit_btn.setMinimumWidth(120)
+        exit_btn.clicked.connect(self.exit_requested.emit)
+        layout.addWidget(exit_btn, alignment=Qt.AlignHCenter)
+        layout.setContentsMargins(0, 0, 0, 16)
 
     @staticmethod
     def _bump_font_size(widget, factor):
