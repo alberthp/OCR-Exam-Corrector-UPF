@@ -1,0 +1,29 @@
+# Virtual environments
+omr_env/
+omr_env_new/
+
+# PyInstaller build artifacts
+build/
+dist/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Third-party Poppler binaries (see poppler_bin/README.md to repopulate)
+poppler_bin/*
+!poppler_bin/README.md
+
+# Review session cache
+*.pkl
+
+# Real exam/student data (private) -- a reduced, sanitized example dataset
+# will be added separately
+*.pdf
+*.xls
+*.xlsx
+*.csv
+output*/
+
+# Claude Code local settings/state (not part of the project)
+.claude/
