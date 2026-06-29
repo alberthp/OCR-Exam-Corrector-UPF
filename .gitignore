@@ -27,3 +27,6 @@ output*/
 
 # Claude Code local settings/state (not part of the project)
 .claude/
+
+# Packaged executable archives (distributed via GitHub Releases, not git)
+*.zip
