@@ -1,6 +1,7 @@
 # Virtual environments
 omr_env/
 omr_env_new/
+run_env/
 
 # PyInstaller build artifacts
 build/
@@ -30,3 +31,6 @@ output*/
 
 # Packaged executable archives (distributed via GitHub Releases, not git)
 *.zip
+
+# GUI launch log (local run artefact)
+omr_gui_run.log
