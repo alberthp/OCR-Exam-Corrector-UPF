@@ -5,8 +5,8 @@ import shutil
 import tempfile
 import time
 
-from PySide6.QtCore import QEvent, Qt, QThread, Signal
-from PySide6.QtGui import QPixmap, QImage
+from PySide6.QtCore import QEvent, QRectF, Qt, QThread, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QMessageBox, QFileDialog,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from pdf2image import convert_from_path
+from reportlab.lib.pagesizes import A4
 import omr_correct as omr
 
 
@@ -146,6 +147,59 @@ class _PreviewRenderWorker(QThread):
             self.done.emit(self.pdf_idx, qimage, '')
         except Exception as e:
             self.done.emit(self.pdf_idx, None, str(e))
+
+
+class _ExpectedAnswersLabel(QLabel):
+    """Preview QLabel that can additionally paint a magenta outline over
+    every bubble the answer key marks correct, on top of the normal
+    (already-rendered) annotated-page pixmap.
+
+    Purely a paint-time overlay -- it never touches the pixmap itself, so
+    the underlying scan is always fully visible and zoom/pan keep working
+    unchanged. Rectangles are stored as fractions (0..1) of the displayed
+    pixmap so they stay correctly placed across zoom levels without being
+    recomputed on every resize.
+    """
+
+    OVERLAY_COLOR = QColor(255, 0, 255)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._overlay_enabled = False
+        self._overlay_rects = []
+
+    def set_overlay_enabled(self, enabled):
+        self._overlay_enabled = enabled
+        self.update()
+
+    def set_overlay_rects(self, rects):
+        self._overlay_rects = rects
+        if self._overlay_enabled:
+            self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._overlay_enabled or not self._overlay_rects:
+            return
+        pixmap = self.pixmap()
+        if pixmap is None or pixmap.isNull():
+            return
+
+        pix_w, pix_h = pixmap.width(), pixmap.height()
+        # The pixmap is drawn centered within this (possibly larger) label.
+        off_x = (self.width() - pix_w) / 2
+        off_y = (self.height() - pix_h) / 2
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(self.OVERLAY_COLOR)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        for fx0, fy0, fx1, fy1 in self._overlay_rects:
+            x0, y0 = off_x + fx0 * pix_w, off_y + fy0 * pix_h
+            x1, y1 = off_x + fx1 * pix_w, off_y + fy1 * pix_h
+            painter.drawRect(QRectF(x0, y0, x1 - x0, y1 - y0))
+        painter.end()
 
 
 class ReviewScreen(QWidget):
@@ -402,11 +456,18 @@ class ReviewScreen(QWidget):
         zoom_row.addWidget(self.zoom_in_btn)
         zoom_row.addWidget(self.zoom_fit_btn)
         zoom_row.addStretch()
+        # Off by default: this is a reviewer aid, not part of the normal
+        # annotated page, so it shouldn't change what's shown until asked for.
+        self.expected_btn = QPushButton("Show expected answers")
+        self.expected_btn.setCheckable(True)
+        self.expected_btn.setChecked(False)
+        self.expected_btn.toggled.connect(self._on_toggle_expected_overlay)
+        zoom_row.addWidget(self.expected_btn)
         layout.addLayout(zoom_row)
 
         self.preview_scroll = QScrollArea()
         self.preview_scroll.setWidgetResizable(True)
-        self.preview_label = QLabel("No preview")
+        self.preview_label = _ExpectedAnswersLabel("No preview")
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_scroll.setWidget(self.preview_label)
         # Ctrl+wheel zooms the preview instead of scrolling it; middle-button
@@ -591,6 +652,82 @@ class ReviewScreen(QWidget):
         self.preview_label.setMinimumSize(scaled.size())
         self.zoom_label.setText(f"{round(self._zoom * 100)}%")
 
+    # ----- Expected-answers overlay -----
+
+    def _on_toggle_expected_overlay(self, checked):
+        self.preview_label.set_overlay_enabled(checked)
+
+    def _compute_expected_overlay(self, r):
+        """Fractional (0..1, top-left origin) rectangles over every bubble
+        the answer key marks correct for this page's permutation.
+
+        Mirrors the image-pixel -> PDF-point placement math in
+        omr_correct._draw_annotated_page() (same A4 page, same centered fit,
+        same margin) so the rectangles line up with the bubbles in the
+        rendered preview, then converts to fractions of the page so they
+        stay aligned regardless of preview DPI or zoom.
+        """
+        corr = r.get('_corrected')
+        if corr is None:
+            return []
+        permut_val = r.get('permut')
+        if permut_val is None:
+            return []
+        correct_by_q = self.correct_answers_by_perm.get(str(permut_val))
+        if not correct_by_q:
+            return []
+
+        img_h, img_w = corr.shape[:2]
+        page_w_pt, page_h_pt = A4
+        margin = 8
+        avail_w = page_w_pt - 2 * margin
+        avail_h = page_h_pt - 2 * margin
+        img_aspect = img_w / img_h
+        page_aspect = avail_w / avail_h
+        if img_aspect > page_aspect:
+            draw_w = avail_w
+            draw_h = avail_w / img_aspect
+        else:
+            draw_h = avail_h
+            draw_w = avail_h * img_aspect
+        img_x_pt = (page_w_pt - draw_w) / 2
+        img_y_pt = (page_h_pt - draw_h) / 2
+        scale_x = draw_w / img_w
+        scale_y = draw_h / img_h
+        hw_pt = omr.BUBBLE_HALF_WIDTH * scale_x
+        hh_pt = omr.BUBBLE_HALF_HEIGHT * scale_y
+
+        answers = r.get('answers', {})
+        rects = []
+        for q, correct_opts in correct_by_q.items():
+            if not correct_opts:
+                continue
+            adata = answers.get(q)
+            if not adata:
+                continue
+            col_x = adata.get('col_x', [])
+            ay = adata.get('ans_y')
+            if ay is None:
+                continue
+            for opt in correct_opts:
+                if opt not in omr.OPTION_LABELS:
+                    continue
+                oi = omr.OPTION_LABELS.index(opt)
+                if oi >= len(col_x):
+                    continue
+                cx = col_x[oi]
+                top_x_pt = img_x_pt + (cx - omr.BUBBLE_HALF_WIDTH) * scale_x
+                top_y_pt = img_y_pt + draw_h - (ay - omr.BUBBLE_HALF_HEIGHT) * scale_y
+                left, right = top_x_pt, top_x_pt + 2 * hw_pt
+                top, bottom = top_y_pt, top_y_pt - 2 * hh_pt
+                rects.append((
+                    left / page_w_pt,
+                    (page_h_pt - top) / page_h_pt,
+                    right / page_w_pt,
+                    (page_h_pt - bottom) / page_h_pt,
+                ))
+        return rects
+
     def _zoom_in(self):
         self._zoom *= self.ZOOM_STEP
         self._apply_zoom()
@@ -628,6 +765,7 @@ class ReviewScreen(QWidget):
 
         self._update_matched_student_preview()
         self._load_answers_grid(r)
+        self.preview_label.set_overlay_rects(self._compute_expected_overlay(r))
         self._loading_form = False
         self._form_dirty = False
 

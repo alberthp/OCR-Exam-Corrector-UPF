@@ -11,14 +11,14 @@ from PySide6.QtWidgets import (
 
 import omr_correct as omr
 
-# Bump this with each meaningful change to the app.
-APP_VERSION = "1.1"
+# Bump this constant with each meaningful release.
+APP_VERSION = "1.2"
 APP_AUTHOR = "Albert Hernansanz (with Claude)"
 APP_EMAIL = "albert.hernansanz@upf.edu"
 
-# sys._MEIPASS is where PyInstaller extracts bundled data at runtime (set for
-# both --onefile and --onedir); falling back to the source tree when not
-# frozen. Project root is two levels up from this file (gui/start_screen.py).
+# sys._MEIPASS is set by PyInstaller to the bundle's extraction directory at
+# runtime (both --onefile and --onedir); it's absent when running from source,
+# so we fall back to the project root two levels above this file.
 _PROJECT_ROOT = getattr(sys, '_MEIPASS', os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LOGO_PATH = os.path.join(_PROJECT_ROOT, 'assets', 'upf_logo.png')
 
@@ -27,7 +27,7 @@ class StartScreen(QWidget):
     """First screen the user sees: evaluate a new exam, or review/edit a past run."""
 
     new_exam_requested = Signal()
-    review_requested = Signal(dict)  # run_state, loaded from a review_cache.pkl
+    review_requested = Signal(dict)  # emits the run_state dict loaded from review_cache.pkl
     exit_requested = Signal()
 
     def __init__(self, parent=None):
@@ -61,8 +61,7 @@ class StartScreen(QWidget):
         logo_pixmap = QPixmap(LOGO_PATH)
         if not logo_pixmap.isNull():
             logo_label = QLabel()
-            # Modest size: cap the height, scale width to match (logo is wide
-            # and white-on-transparent, designed for a dark background).
+            # Modest fixed height; the logo is wide and designed for dark backgrounds.
             scaled = logo_pixmap.scaledToHeight(70, Qt.SmoothTransformation)
             logo_label.setPixmap(scaled)
             logo_label.setContentsMargins(0, 0, 0, 16)
@@ -80,15 +79,17 @@ class StartScreen(QWidget):
 
     @staticmethod
     def _bump_font_size(widget, factor):
+        """Scale a widget's font by factor, handling both point-size and pixel-size fonts."""
         font = widget.font()
         if font.pointSizeF() > 0:
             font.setPointSizeF(font.pointSizeF() * factor)
         else:
-            # Some platforms report fonts in pixel size instead of points.
+            # Some platforms (notably some Linux themes) report fonts in pixel size.
             font.setPixelSize(max(1, round(font.pixelSize() * factor)))
         widget.setFont(font)
 
     def _open_previous_results(self):
+        """Open a file dialog to pick a review_cache.pkl from a previous session."""
         cache_path, _ = QFileDialog.getOpenFileName(
             self, "Select review_cache.pkl from a previous run", "",
             "Review cache (review_cache.pkl);;All files (*)")
@@ -99,6 +100,8 @@ class StartScreen(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Could not open results", str(e))
             return
+        # The cache stores only filenames for excel/pdf (so it survives the
+        # output folder being renamed), but they must still live next to it.
         if not os.path.exists(run_state['excel_path']) or not os.path.exists(run_state['pdf_path']):
             QMessageBox.warning(
                 self, "Missing files",

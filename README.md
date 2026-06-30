@@ -17,12 +17,12 @@ for review — with a desktop GUI to fix any mismatches by hand.
    different shuffled key), with partial credit for multi-answer questions.
 3. **Generates output**: `results.xlsx` (one sheet per permutation + a
    summary) and `annotated_review.pdf` (the scan with vector-graphics
-   overlays — colored boxes per bubble, ID field values, traffic-light
+   overlays — coloured boxes per bubble, ID field values, traffic-light
    status per page).
 4. **Lets you review and fix mistakes**: a page-by-page review screen shows
-   the annotated page next to an editable form; corrections save
-   immediately (and persist across sessions), with a one-click "Revert to
-   original" and "Rescan this page" if the OCR read something wrong.
+   the annotated page next to an editable form; corrections save immediately
+   (and persist across sessions), with a one-click "Revert to original" and
+   "Rescan this page" if the OCR read something wrong.
 
 ## Desktop app
 
@@ -34,18 +34,21 @@ Run `python omr_gui.py` (or the packaged `.exe` — see below). Three screens:
   straight into review.
 - **Review** — step through pages, fix identification fields and answer
   marks, zoom (`+`/`-`, `Ctrl`+scroll wheel) and pan (middle-click drag) the
-  annotated preview. Every correction is saved automatically (`results.xlsx`
-  and `annotated_review.pdf` updated immediately) and a `review_cache.pkl`
-  lets the same session be reopened later. The "Apply correction" button
-  turns orange while a change hasn't fully reached disk yet, and back to
-  normal once it has.
+  annotated preview. Toggle **"Show expected answers"** to overlay magenta
+  outlines on every bubble the answer key marks correct — a visual aid for
+  the reviewer that never modifies the underlying scan. Every correction is
+  saved automatically (`results.xlsx` and `annotated_review.pdf` updated
+  immediately) and a `review_cache.pkl` lets the same session be reopened
+  later. The "Apply correction" button turns orange while a change hasn't
+  fully reached disk yet, and back to normal once it has.
 
 Manually-added/removed answer marks and manually-edited PARCIAL/PERMUT/GRUP
 values are highlighted in **purple** on the annotated PDF (circle = added,
 cross = removed, purple pill = field corrected by hand) so it's clear at a
 glance what came from the scanner versus a human correction.
 
-See [INSTALL.md](INSTALL.md) for detailed setup, input file formats, the
+See [MANUAL.md](MANUAL.md) for the full step-by-step user manual, and
+[INSTALL.md](INSTALL.md) for detailed setup, input file formats, the
 command-line interface (`omr_correct.py`), and troubleshooting.
 
 ## Running from source
@@ -87,20 +90,31 @@ Two things worth knowing when building or distributing it:
   time they see it). On a managed/corporate machine where it never finishes,
   ask IT to whitelist the app's folder or file hash.
 
+## What's new in v1.2
+
+- **Expected-answers overlay** in the review screen: click "Show expected
+  answers" in the preview toolbar to display magenta outlines over every
+  bubble the answer key marks correct for the current page's permutation.
+  The overlay is purely visual (the underlying scan is unchanged), scales
+  with zoom, and is off by default.
+
 ## Project structure
 
-```
-omr_correct.py        OCR/grading pipeline + CLI entry point
-omr_gui.py             GUI entry point (also bootstraps bundled Poppler)
+```text
+omr_correct.py            OCR/grading pipeline + CLI entry point
+omr_gui.py                GUI entry point (also bootstraps bundled Poppler)
 gui/
-  start_screen.py       landing screen (new exam / review existing)
-  new_exam_screen.py     input form + background OCR run
-  review_screen.py        page-by-page review/correction screen
+  start_screen.py           landing screen (new exam / review existing)
+  new_exam_screen.py        input form + background OCR run
+  review_screen.py          page-by-page review/correction screen
   main_window.py            wires the three screens together
-poppler_bin/           bundled standalone Poppler binaries (for the .exe build)
-"OMR Exam Corrector.spec"  PyInstaller build configuration
-requirements.txt       Python dependencies
-INSTALL.md             detailed setup, file formats, CLI reference, troubleshooting
+assets/
+  upf_logo.png              logo shown on the start screen
+poppler_bin/              bundled standalone Poppler binaries (for the .exe build)
+"OMR Exam Corrector.spec" PyInstaller build configuration
+requirements.txt          Python dependencies
+INSTALL.md                detailed setup, file formats, CLI reference, troubleshooting
+MANUAL.md                 step-by-step user manual
 ```
 
 ## Author

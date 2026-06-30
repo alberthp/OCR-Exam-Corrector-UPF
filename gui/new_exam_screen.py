@@ -16,12 +16,17 @@ import omr_correct as omr
 
 
 class AnalysisWorker(QThread):
-    """Runs the OMR pipeline in a background thread so the UI stays responsive."""
+    """Runs the full OMR pipeline in a background thread so the UI stays responsive.
+
+    Emits page_done after each page so the table updates live, and either
+    finished_ok (with the complete run_state dict) or failed (with an error
+    string) at the end.
+    """
 
     log = Signal(str)
-    page_done = Signal(int, int, dict)  # current, total, page_info
-    finished_ok = Signal(dict)
-    failed = Signal(str)
+    page_done = Signal(int, int, dict)   # (current_page, total_pages, page_info)
+    finished_ok = Signal(dict)           # run_state dict consumed by ReviewScreen.load()
+    failed = Signal(str)                 # human-readable error + traceback
 
     def __init__(self, exam_pdf, students_path, answers_path,
                  num_questions, num_options, output_dir, dpi):
@@ -32,7 +37,7 @@ class AnalysisWorker(QThread):
         self.num_questions = num_questions
         self.num_options = num_options
         self.output_dir = output_dir
-        self.dpi = dpi
+        self.dpi = dpi  # 0 = auto-detect
 
     def run(self):
         try:
@@ -58,6 +63,7 @@ class AnalysisWorker(QThread):
             total = len(pages)
             self.log.emit(f"  {total} pages rendered")
 
+            # Build a U-number lookup to show student names in the live table.
             student_lookup = {}
             for _, row in students_df.iterrows():
                 u = str(row.get('U_number', '')).strip().upper().replace('U', '')
@@ -70,6 +76,8 @@ class AnalysisWorker(QThread):
                     r, _corrected = omr.process_page(
                         page, i + 1, self.num_questions, self.num_options, source_dpi=dpi)
                 except Exception as e:
+                    # Per-page exceptions are non-fatal; mark and continue so one
+                    # bad scan doesn't abort the whole exam batch.
                     r = {'page': i + 1, 'status': 'EXCEPTION', 'error': str(e)}
                 all_results.append(r)
 
@@ -118,12 +126,9 @@ class AnalysisWorker(QThread):
                 'excel_path': excel_path,
                 'pdf_path': pdf_path,
                 'output_dir': self.output_dir,
-                # Kept around so the review screen can be populated without
-                # re-running the OMR pipeline: corrections are applied to
-                # these same in-memory result dicts (including the '_corrected'
-                # images needed to redraw a single annotated PDF page). The
-                # cache file lets the same review session be reopened later
-                # (e.g. after restarting the app) via "Review existing results".
+                # Pass the full in-memory results to the review screen so it
+                # can redraw single PDF pages on correction without re-running OCR.
+                # The cache file lets the same session be reopened after restart.
                 'all_results': all_results,
                 'students_df': students_df,
                 'correct_answers_by_perm': correct_answers_by_perm,
@@ -139,7 +144,11 @@ class AnalysisWorker(QThread):
 
 
 class FileRow(QWidget):
-    """A labeled line-edit + Browse button, used for every file/folder picker."""
+    """A QLineEdit + "Browse..." button pair used for every file/folder picker.
+
+    dialog_fn is a zero-argument callable that opens a file dialog and returns
+    the chosen path (or '' if cancelled).
+    """
 
     def __init__(self, dialog_fn):
         super().__init__()
@@ -165,12 +174,11 @@ class FileRow(QWidget):
 
 
 class NewExamScreen(QWidget):
-    """Input form + progress/log for running the OMR pipeline on a new exam PDF.
+    """Input form + live progress/log for running the OMR pipeline on a new exam PDF.
 
-    On success, emits `finished_run` with the run-state dict so the host
-    window can switch straight to the review screen -- no popup, no extra
-    click. On failure, the error stays on this screen so the user can fix
-    inputs and retry.
+    On success, emits finished_run with the run-state dict so MainWindow can
+    switch straight into the review screen — no extra click needed.  On
+    failure the error stays visible so the user can fix inputs and retry.
     """
 
     finished_run = Signal(dict)
@@ -248,9 +256,8 @@ class NewExamScreen(QWidget):
         form = QFormLayout()
 
         self.questions_spin = QSpinBox()
-        # 100 max: the bubble sheet template has 5 answer columns x 20 rows,
-        # so anything beyond that has no bubbles to read and would crash
-        # read_answers() with an out-of-range column index.
+        # 100 max: the bubble sheet has 5 answer columns × 20 rows; beyond
+        # that there are no bubbles to read, and read_answers() would crash.
         self.questions_spin.setRange(1, 100)
         self.questions_spin.setValue(10)
         form.addRow("Number of questions:", self.questions_spin)
@@ -269,6 +276,7 @@ class NewExamScreen(QWidget):
         self.dpi_spin.setRange(72, 1200)
         self.dpi_spin.setValue(300)
         self.dpi_spin.setEnabled(False)
+        # Auto-detect is almost always right; manual override is a fallback.
         self.dpi_auto_check.toggled.connect(lambda checked: self.dpi_spin.setEnabled(not checked))
         dpi_layout.addWidget(self.dpi_auto_check)
         dpi_layout.addWidget(self.dpi_spin)
@@ -341,7 +349,8 @@ class NewExamScreen(QWidget):
     def _on_page_done(self, current, total, info):
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(current)
-        self.progress_label.setText(f"Processing page {current}/{total}: U={info['u_number']} {info['name']}")
+        self.progress_label.setText(
+            f"Processing page {current}/{total}: U={info['u_number']} {info['name']}")
 
         row = self.table.rowCount()
         self.table.insertRow(row)
@@ -368,6 +377,7 @@ class NewExamScreen(QWidget):
         QMessageBox.critical(self, "Analysis failed", err.split('\n')[0])
 
     def _open_output_folder(self):
+        """Open the output directory in Windows Explorer."""
         path = os.path.abspath(self.output_dir)
         if os.path.isdir(path):
             os.startfile(path)

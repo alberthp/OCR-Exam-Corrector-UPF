@@ -73,12 +73,18 @@ REF_DNI_BOX_X = 243
 # =============================================
 
 def detect_id_boxes(img_bgr):
-    """Detect the 7 ID field boxes (DNI, CENTRE, ASSIGNATURA, PARCIAL, PERMUT, GRUP, IDENTIFIER).
+    """Detect the 7 labeled rectangular boxes in the ID header strip of the form.
 
-    Returns a dict mapping field_name -> {'x', 'y', 'w', 'h'} for each detected box.
-    Used both as a QUALITY CHECK (if all 7 boxes are detected with expected
-    dimensions, the perspective correction was successful) and to position
-    the orange box outlines + value pills drawn in the annotated PDF.
+    The physical form has seven red-bordered boxes across the top of the page,
+    each containing a column of numbered bubbles: DNI (8 digits), CENTRE (3),
+    ASSIGNATURA (5), PARCIAL (2), PERMUT (1), GRUP (2), and IDENTIFIER (8).
+    These boxes are visually distinct from the answer area because they span
+    roughly the top 50% of the page and are drawn with a thick red border.
+
+    Returns a dict mapping field_name -> {'x', 'y', 'w', 'h'} for each
+    detected box.  Used both as a QUALITY CHECK (all 7 found with consistent
+    geometry -> perspective correction succeeded) and to position the orange
+    outlines + value pills in the annotated PDF.
     """
     h, w = img_bgr.shape[:2]
     rf = img_bgr[:,:,2].astype(float)
@@ -170,9 +176,15 @@ def detect_id_boxes(img_bgr):
 
 
 def validate_perspective_correction(boxes):
-    """
-    Use the detected ID boxes to validate that perspective correction worked.
-    
+    """Use the detected ID boxes to validate that perspective correction worked.
+
+    quality_score is a rough 0-1 confidence figure: it starts at n_detected/7
+    (fraction of expected boxes found) and is multiplied by 0.8 for each
+    additional geometric inconsistency (e.g. width mismatch between DNI and
+    IDENTIFIER, excessive vertical scatter).  A score of 1.0 means all 7 boxes
+    were found with no geometric anomalies; below ~0.7 the page should be
+    flagged for manual review.
+
     Returns dict with:
         - 'is_valid': bool - True if all 7 boxes detected with consistent geometry
         - 'n_detected': int - Number of boxes found
@@ -215,32 +227,47 @@ def validate_perspective_correction(boxes):
 
 
 def detect_form_rectangle(img_bgr):
-    """Find the 4 corners of the answer area's red border rectangle."""
+    """Find the 4 corners of the answer area's red border rectangle.
+
+    Isolates the red ink of the printed form border (high R, low G/B, mid
+    brightness to exclude both white paper and black markers), morphologically
+    closes small gaps, then picks the largest contour that spans at least 70%
+    of page width and 40% of page height -- the outer border of the entire
+    answer area, not one of the individual field boxes.
+
+    Corner assignment uses the classic sum/difference trick on contour points:
+      top-left     = smallest (x+y)    top-right    = largest (x-y)
+      bottom-right = largest  (x+y)    bottom-left  = smallest (x-y)
+    This is rotation-invariant for moderate skew angles (< ~20°).
+
+    Returns dict with keys 'tl', 'tr', 'br', 'bl' (each a (x,y) ndarray),
+    or None if no suitable contour is found.
+    """
     h, w = img_bgr.shape[:2]
     rf = img_bgr[:,:,2].astype(float)
     gf = img_bgr[:,:,1].astype(float)
     bf = img_bgr[:,:,0].astype(float)
-    
+
     form_mask = np.uint8(
-        (rf - np.maximum(gf, bf) > 3) & 
-        (img_bgr.mean(axis=2) > 80) & 
-        (img_bgr.mean(axis=2) < 240) & 
+        (rf - np.maximum(gf, bf) > 3) &
+        (img_bgr.mean(axis=2) > 80) &
+        (img_bgr.mean(axis=2) < 240) &
         (rf > 100)
     ) * 255
-    
+
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     form_clean = cv2.morphologyEx(form_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-    
+
     contours, _ = cv2.findContours(form_clean, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     target = max(
-        (c for c in contours 
+        (c for c in contours
          if cv2.boundingRect(c)[2] > w*0.7 and cv2.boundingRect(c)[3] > h*0.4),
         key=cv2.contourArea, default=None
     )
-    
+
     if target is None:
         return None
-    
+
     pts = target.reshape(-1, 2)
     sums = pts[:, 0] + pts[:, 1]
     diffs = pts[:, 0] - pts[:, 1]
@@ -248,26 +275,43 @@ def detect_form_rectangle(img_bgr):
     br = pts[np.argmax(sums)]
     tr = pts[np.argmax(diffs)]
     bl = pts[np.argmin(diffs)]
-    
+
     return {'tl': tl, 'tr': tr, 'br': br, 'bl': bl}
 
 
 def correct_perspective(img_bgr, corners):
-    """Apply perspective transform using detected corners."""
+    """Apply a 4-point perspective warp to de-skew the scanned form.
+
+    Computes a homography M that maps the detected (possibly skewed/rotated)
+    form rectangle onto an axis-aligned rectangle of the same average width and
+    height, anchored at the original top-left corner.  Anchoring at 'tl' keeps
+    the corrected form in the same part of the canvas as the original, so the
+    hardcoded pixel coordinates (REF_DNI_X, ANS_COL_A_X, etc.) remain valid
+    without any additional translation.
+
+    BORDER_REPLICATE fills the thin slivers outside the warped region with
+    edge pixels, which is neutral (neither dark nor white) and avoids the
+    edge-bright artifacts that BORDER_CONSTANT=white would cause near the
+    left margin where markers are detected.
+
+    Returns (corrected_bgr, M) where M is the 3x3 homography (kept for
+    potential coordinate back-projection).
+    """
     h, w = img_bgr.shape[:2]
     tl, tr, br, bl = corners['tl'], corners['tr'], corners['br'], corners['bl']
-    
+
+    # Average opposite-side lengths to handle mild trapezoidal distortion
     w_avg = int((np.linalg.norm(tr - tl) + np.linalg.norm(br - bl)) / 2)
     h_avg = int((np.linalg.norm(bl - tl) + np.linalg.norm(br - tr)) / 2)
-    
+
     src = np.array([tl, tr, br, bl], dtype=np.float32)
     dst = np.array([
-        tl, 
-        tl + [w_avg, 0], 
-        tl + [w_avg, h_avg], 
+        tl,
+        tl + [w_avg, 0],
+        tl + [w_avg, h_avg],
         tl + [0, h_avg]
     ], dtype=np.float32)
-    
+
     M = cv2.getPerspectiveTransform(src, dst)
     corrected = cv2.warpPerspective(
         img_bgr, M, (w, h),
@@ -278,7 +322,23 @@ def correct_perspective(img_bgr, corners):
 
 
 def detect_markers(gray):
-    """Detect black alignment markers on left margin."""
+    """Detect the black alignment markers printed on the left margin of the form.
+
+    The form has a column of solid black rectangles running down the left edge.
+    Their y-positions encode the row grid: the first 10 markers align with the
+    10 ID digit rows; then there is a visible gap; then 40 markers align with
+    the 40 answer rows (20 questions x 2 rows each: answer + cancel).
+
+    Detection strategy:
+      1. Restrict to the leftmost 15% of the image (marker column only).
+      2. Threshold with Otsu to handle scan-to-scan brightness variation.
+      3. Project dark pixels onto the y-axis to get a row-intensity profile.
+      4. Cluster bright peaks into individual marker centre rows.
+      5. Find the largest spacing gap to split the run into id_rows / ans_rows.
+
+    Returns (id_rows, ans_rows, median_spacing) as numpy arrays of y-pixel
+    positions, or (None, None, None) if fewer than 20 markers are found.
+    """
     h, w = gray.shape
     left = gray[:, :int(w*0.15)]
     # Adaptive (Otsu) threshold instead of a fixed <30 cutoff: scan-to-scan
@@ -357,7 +417,22 @@ def detect_markers(gray):
 
 
 def find_x_offset(img_bgr, id_rows):
-    """Find horizontal offset of the form within the page."""
+    """Find the horizontal shift of the form relative to the hardcoded reference coordinates.
+
+    The reference bubble x-positions (REF_DNI_X, REF_CENTRE_X, etc.) were
+    calibrated on a specific scan where the form's left edge happened to land
+    at a particular x.  Every real scan may shift the form slightly left or
+    right (due to paper feed variation or the scanner's paper guide).
+    x_offset is added to every REF_*_X value before reading a bubble, so a
+    positive offset means the form printed further to the right than the
+    reference scan.
+
+    Strategy: look for a group of 6-10 small red blobs (the ID bubble column
+    outlines) in the horizontal band spanned by id_rows, find the one group
+    whose x-positions cluster with the expected DNI column spacing, and derive
+    the shift from the leftmost blob vs. the calibrated DNI first-column x.
+    Falls back to 77 (the empirically observed median offset) on failure.
+    """
     h, w = img_bgr.shape[:2]
     rf = img_bgr[:,:,2].astype(float)
     gf = img_bgr[:,:,1].astype(float)
@@ -404,16 +479,22 @@ def find_x_offset(img_bgr, id_rows):
 
 
 def calibrate_color_thresholds(img_bgr, id_y_range=None):
-    """
-    Calibrate per-page color thresholds by sampling the actual ink/pencil 
-    color of the student's marks vs the form/paper background.
-    
-    Strategy:
-    1. Sample known DARK pixels (the black markers on the left margin)
-       to learn what "definitely dark" looks like.
-    2. Sample background/paper pixels (most of the page)
-       to learn what "definitely paper" looks like.
-    3. Returns adaptive thresholds for the student mask.
+    """Calibrate per-page brightness threshold by sampling anchor regions.
+
+    Different scanner models and paper stocks produce different brightness
+    levels for the same ink.  A fixed threshold (e.g. <160 = dark) would
+    either miss light pencil marks on high-contrast scanners or include form
+    elements on low-contrast scanners.  Instead, this function samples two
+    known-reference regions -- the left-margin marker strip (definitely dark)
+    and the top-right blank corner (definitely paper white) -- and places the
+    threshold 55% of the way from dark to paper.  The 55% bias toward the dark
+    side ensures lightly-filled pencil bubbles (closer to the paper end of the
+    scale) are still caught.
+
+    Returns a dict with:
+        'brightness_threshold': int   -- pixels below this are treated as marks
+        'dark_reference': float       -- mean brightness of sampled dark pixels
+        'paper_reference': float      -- mean brightness of sampled paper pixels
     """
     h, w = img_bgr.shape[:2]
     
@@ -451,9 +532,18 @@ def calibrate_color_thresholds(img_bgr, id_y_range=None):
 
 
 def make_student_mask(img_bgr, color_cal=None):
-    """Separate student marks (blue ink, pencil) from red form.
-    
-    Uses adaptive thresholds calibrated per page when color_cal is provided.
+    """Build a binary mask that isolates student marks and excludes the printed form.
+
+    The mask is 255 where a pixel is likely a student mark (pencil or blue/dark
+    ink) and 0 everywhere else (paper white, red form lines, red bubble outlines).
+    A pixel is accepted if it is either:
+      - Generally dark (brightness < threshold) AND not strongly red-dominant
+        (this catches pencil and dark-ink fills)
+      - More blue than red by at least 10 counts AND not too bright
+        (this catches students who use blue ballpoint or felt-tip pens)
+
+    The resulting mask is the sole input to read_bubble_fill() -- no pixel-level
+    color information flows past this point, only fill ratios.
     """
     bf = img_bgr[:,:,0].astype(float)
     gf = img_bgr[:,:,1].astype(float)
@@ -477,7 +567,15 @@ def make_student_mask(img_bgr, color_cal=None):
 
 
 def read_bubble_fill(mask, cx, cy):
-    """Read fill ratio of a single bubble at (cx, cy)."""
+    """Return the fraction of mask pixels that are set (255) in a bubble's ROI.
+
+    The ROI is a rectangle of size (2*BUBBLE_HALF_WIDTH) x (2*BUBBLE_HALF_HEIGHT)
+    centred on (cx, cy).  The fill ratio is the count of set pixels divided by
+    total pixels; an empty/unmarked bubble returns ~0.01-0.04 (noise from form
+    lines), while a clearly filled bubble returns 0.15-0.80 depending on how
+    heavily the student marked it.  FILL_THRESHOLD_ANS / FILL_THRESHOLD_DIGIT
+    are set relative to this scale.
+    """
     y1 = max(0, cy - BUBBLE_HALF_HEIGHT)
     y2 = min(mask.shape[0], cy + BUBBLE_HALF_HEIGHT)
     x1 = max(0, cx - BUBBLE_HALF_WIDTH)
@@ -486,19 +584,28 @@ def read_bubble_fill(mask, cx, cy):
     return roi.sum() / (roi.size * 255.0) if roi.size > 0 else 0.0
 
 
-def compute_adaptive_digit_threshold(peak_fills, default=0.35, 
+def compute_adaptive_digit_threshold(peak_fills, default=0.35,
                                        min_thresh=0.20, max_thresh=0.50):
-    """
-    Find the natural gap between noise floor and real marks on this page.
-    
+    """Find the natural gap separating noise from real marks in this page's fill distribution.
+
+    The fill values across all ID columns on a page are assumed to be bimodal:
+    a low cluster near 0 (empty bubbles -- noise from printed outlines) and a
+    higher cluster (filled bubbles -- student marks).  The threshold is placed
+    at the midpoint of the largest gap found between consecutive sorted fills,
+    provided the gap is at least 0.10 wide.
+
+    On very lightly-marked pages (faint pencil) the gap may be narrow, causing
+    the function to fall back to `default`.  The clamp [min_thresh, max_thresh]
+    prevents degenerate thresholds from slipping into either cluster.
+
     Args:
-        peak_fills: list of peak fill values from all ID columns on the page
-        default: fallback threshold if no clear gap detected
-        min_thresh: minimum acceptable threshold (anything below = noise)
-        max_thresh: maximum acceptable threshold (above this = clearly a mark)
-    
+        peak_fills: list of per-column peak fill ratios sampled from the page
+        default: fallback threshold if no clear gap is found (width < 0.10)
+        min_thresh: lower bound on returned threshold (noise floor guard)
+        max_thresh: upper bound on returned threshold (mark acceptance guard)
+
     Returns:
-        float: adaptive threshold for this page
+        float: threshold for this page; a fill above this is accepted as a mark
     """
     if not peak_fills:
         return default
@@ -533,18 +640,35 @@ def compute_adaptive_digit_threshold(peak_fills, default=0.35,
     return max(min_thresh, min(max_thresh, best_threshold))
 
 
-def read_digit_marker_anchored(mask, cx, id_rows, median_sp, w, 
+def read_digit_marker_anchored(mask, cx, id_rows, median_sp, w,
                                   fill_threshold=None):
-    """Read a digit column using marker-anchored peak detection.
-    
+    """Detect which digit (0-9) is filled in a single ID bubble column.
+
+    "Marker-anchored" means the result is only accepted if the detected ink
+    peak aligns with a known marker row (within 70% of the median spacing).
+    This prevents spurious reads from form lines, shadow artifacts, or ink
+    bleed in the gap between the ID and answer sections.
+
+    Strategy:
+      1. Extract a vertical strip of the student mask covering the full ID row range.
+      2. Project horizontally (mean across the strip's width) to get a 1-D fill profile.
+      3. Find the tallest peak in that profile.
+      4. Accept only if: peak fill >= fill_threshold AND the peak y aligns with
+         one of id_rows (distance < 0.7 * median_sp).
+      5. Return the 0-based index of the matching id_row as the digit value.
+
     Args:
-        fill_threshold: minimum peak fill to accept as a mark. 
-                       If None, uses the global FILL_THRESHOLD_DIGIT.
-    
-    Returns (digit, fill) or (None, max_fill) if:
-    - No peak found
-    - Peak doesn't align with a marker row
-    - Peak fill is below fill_threshold (treated as noise / unfilled column)
+        mask: binary student mask (output of make_student_mask)
+        cx: x centre of the bubble column (already offset-corrected)
+        id_rows: array of y-pixel positions for digit rows 0-9
+        median_sp: median row-to-row spacing in pixels (from detect_markers)
+        w: image width (used for boundary clamping)
+        fill_threshold: minimum peak fill to accept as a mark;
+                        defaults to FILL_THRESHOLD_DIGIT if None
+
+    Returns:
+        (digit, fill): digit is the row index (0-9) or None; fill is the peak
+        fill ratio (useful for adaptive threshold calibration even on None returns)
     """
     if fill_threshold is None:
         fill_threshold = FILL_THRESHOLD_DIGIT
@@ -585,8 +709,12 @@ def read_digit_marker_anchored(mask, cx, id_rows, median_sp, w,
 
 
 def get_column_peak_fill(mask, cx, id_rows, median_sp, w):
-    """Just measure the peak fill of a column, without applying any threshold.
-    Used for adaptive threshold calibration."""
+    """Return the strongest fill peak in a column strip without any threshold or digit check.
+
+    Used to build the list of raw fill values that compute_adaptive_digit_threshold()
+    uses to locate the noise/signal gap.  Applying the threshold here would be circular
+    (the threshold hasn't been computed yet).
+    """
     y_margin = int(median_sp * 0.8)
     y_top = int(id_rows[0]) - y_margin
     y_bot = int(id_rows[-1]) + y_margin
@@ -604,7 +732,23 @@ def get_column_peak_fill(mask, cx, id_rows, median_sp, w):
 # =============================================
 
 def decode_identifier(digits):
-    """Decode U-number with flexible positioning (padding 00, offset, etc.)."""
+    """Decode the student's 6-digit U-number from a raw 8-bubble read.
+
+    The IDENTIFIER field has 8 bubble columns, but the U-number is only 6
+    digits.  Students may bubble the 6 digits in any 6 consecutive positions,
+    padding with leading or trailing zeros for the remaining 2.  This function
+    handles the ambiguity:
+
+      * 8 non-null digits, first two zeros  -> strip leading '00', take digits 2-7
+      * 8 non-null digits, last two zeros   -> take digits 0-5
+      * 8 non-null digits, both ambiguous   -> return 'AMBIGUOUS' with both candidates
+      * exactly 6 non-null digits           -> return as-is ('OK')
+      * 7 non-null digits with a leading/trailing 0 -> strip the pad, return 'OK_PADDED'
+      * < 6 non-null digits                 -> return 'INCOMPLETE'
+
+    Returns (u_number_str, status_str).  Status is used downstream to colour-code
+    the IDENTIFIER cell in the Excel output and the annotated PDF header.
+    """
     non_null = [(i, d) for i, d in enumerate(digits) if d is not None]
     
     if len(non_null) == 0:
@@ -649,10 +793,28 @@ def decode_grup(digits):
 
 def read_answers(mask, x_offset, ans_rows, num_questions, num_options=5,
                  fill_threshold=None):
-    """Read all answers with two-row invalidation logic.
-    
+    """Read all student answers, applying the form's two-row cancel mechanism.
+
+    Each question occupies TWO consecutive marker rows in ans_rows:
+      - Row 2k   (ans_row):  the student marks their chosen option(s) here
+      - Row 2k+1 (can_row):  the student can cancel a mark by filling the same
+                              option column in this row
+
+    Cancellation logic:
+      - net_marked = bubbles filled in ans_row BUT NOT in can_row
+        (a cancelled bubble is excluded from the answer set)
+      - If only cancel-row bubbles are present with no ans-row marks -> ONLY_CANCEL
+        (form filled out in wrong order; treated as no answer)
+      - If ans-row marks are fully negated by cancel-row marks -> FULLY_CANCELLED
+
+    Status values:
+      'OK'              -- normal (may be blank or marked)
+      'ONLY_CANCEL'     -- cancel row has marks but answer row does not
+      'FULLY_CANCELLED' -- all answer-row marks were cancelled
+
     Args:
-        fill_threshold: minimum fill ratio to count as marked. Adaptive if None.
+        fill_threshold: minimum fill ratio to count as marked; uses
+                        FILL_THRESHOLD_ANS if None
     """
     if fill_threshold is None:
         fill_threshold = FILL_THRESHOLD_ANS
@@ -706,20 +868,25 @@ def read_answers(mask, x_offset, ans_rows, num_questions, num_options=5,
 
 
 def score_question(student_marks, correct_answers, num_options):
-    """
-    Multi-answer scoring formula:
-      Each option marked:
-        - if correct option: +1 / GOOD
-        - if incorrect option: -1 / (ALL - GOOD)
-      Sum capped at 0 (no negative per-question score).
-    
+    """Compute the partial-credit score for one question.
+
+    UPF multi-answer partial-credit formula:
+      - Marking a correct option:   +1 / |CORRECT|
+      - Marking an incorrect option: -1 / (num_options - |CORRECT|)
+      - Not marking an option: 0
+      - Total is clamped to [0, 1] (no negative score per question)
+
+    Rationale: a student who marks all options scores 0 (positives and
+    negatives cancel exactly), which prevents gambling on unknown questions.
+    A student who marks exactly the correct set scores 1.0.
+
     Args:
-        student_marks: set of options marked by student (e.g. {'A', 'C'})
-        correct_answers: set of correct options (e.g. {'A', 'B'})
-        num_options: total options (ALL)
-    
+        student_marks: set of option labels the student marked (e.g. {'A', 'C'})
+        correct_answers: set of correct option labels (e.g. {'A', 'B'})
+        num_options: total number of options available for this question
+
     Returns:
-        float: question score in [0, 1]
+        float in [0, 1]: the student's score for this question
     """
     good = len(correct_answers)
     if good == 0 or good == num_options:
@@ -820,16 +987,37 @@ def auto_rotate_to_portrait(img_bgr):
 
 
 def process_page(img_pil, page_num, num_questions, num_options=5, source_dpi=300):
-    """Process one exam page. Returns dict with all detected data.
-    
+    """Run the full OMR pipeline for one scanned exam page.
+
+    Pipeline stages (each stage feeds into the next):
+      0a. Auto-rotate   -- bring the left-margin marker column to the left edge
+      0b. Normalize DPI -- rescale to REFERENCE_DPI so all constants apply
+      1.  Corner detect -- find the 4 corners of the red form border
+      2.  Perspective   -- warp the image to remove skew/rotation
+      3.  Marker detect -- locate the 10 ID rows and 40 answer rows by y-position
+      4.  X-offset      -- measure how far the form shifted horizontally
+      5a. Color calibrate-- determine per-page brightness threshold
+      5b. Student mask  -- isolate student ink from the red form
+      5c-d. Adaptive threshold -- find the noise/signal gap in fill values
+      5e. Box detection -- validate perspective via ID field box geometry
+      5f. Offset XVal   -- cross-validate x_offset using detected DNI box
+      6.  ID fields     -- read DNI, CENTRE, ASSIGNATURA, PARCIAL, PERMUT, GRUP, IDENTIFIER
+      7.  Answer threshold -- compute adaptive threshold for answer bubbles
+      8.  Answers       -- read all question answers with cancel-row logic
+
     Args:
         img_pil: PIL image of the scanned page
-        page_num: page number (1-indexed)
+        page_num: page number (1-indexed, for error reporting)
         num_questions: number of questions to grade
         num_options: number of options per question (default 5)
-        source_dpi: DPI of the source PDF (default 300). The image is resized
-                    to REFERENCE_DPI internally if needed, so all coordinate
-                    constants remain valid.
+        source_dpi: DPI the PDF was rendered at; image is rescaled to
+                    REFERENCE_DPI internally so all hardcoded coordinates stay valid
+
+    Returns:
+        (result_dict, corrected_bgr): result carries all detected data plus
+        private '_corrected', '_mask', '_id_rows', '_ans_rows', '_median_sp'
+        arrays for downstream annotation/caching.  Returns (result, None) on
+        early failure (CORNER_ERROR or MARKER_ERROR).
     """
     img = np.array(img_pil)
     img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
@@ -1002,11 +1190,24 @@ def process_page(img_pil, page_num, num_questions, num_options=5, source_dpi=300
 
 def _write_results_sheet(ws, results_list, student_lookup, correct_answers,
                           num_questions, num_options=5):
-    """Write one Results-style sheet (header rows + one row per page) for a
-    single permutation's answer key. Shared by write_excel for each
-    Perm-N sheet and for the No_Perm_Detected sheet (called with an empty
-    correct_answers dict, which naturally leaves Score columns blank via the
-    existing `if correct_set:` / `if q in correct_answers:` checks below).
+    """Populate one worksheet with a results table for a single permutation.
+
+    Column layout (left to right):
+      Cols 1-16  (fixed): Page, Status, U_Number, U_Status, Name, Surname1,
+                          Surname2, DNI, PARCIAL, PERMUT, GRUP, N_Answered,
+                          Grade, Grade_10, ID_Problem, Manual_Edit
+      Then for each question Q (repeated num_questions times):
+        (num_options) option columns  -- 1 if student marked that option, else 0
+        1 Score column                -- partial-credit score for this question
+
+    Row layout:
+      Row 1: merged "Q{n}" header spanning each question's (num_options+1) columns
+      Row 2: column sub-headers (A/B/C/D/E + Score, repeated per question)
+      Row 3: CORRECT ANSWERS reference row (1/0 per option, score = 1.0 or blank)
+      Row 4+: one data row per scanned page
+
+    An empty correct_answers dict is passed for the No_Perm_Detected sheet, which
+    causes all Score cells to remain blank rather than scoring against a wrong key.
     """
     hdr_font = Font(bold=True, color='FFFFFF', name='Arial', size=10)
     hdr_fill = PatternFill('solid', fgColor='2C3E50')
@@ -1252,17 +1453,22 @@ def _write_results_sheet(ws, results_list, student_lookup, correct_answers,
 
 def write_excel(all_results, students_df, correct_answers_by_perm, output_path,
                  num_questions, num_options=5):
-    """Generate Excel with one sheet per exam permutation.
+    """Generate an Excel workbook with one results sheet per exam permutation.
 
-    correct_answers_by_perm: dict mapping permutation key (str, e.g. '0',
-    '1', '2') to that permutation's {question_num: set_of_correct_letters}
-    answer key, as returned by load_correct_answers().
+    Sheet structure:
+      "Perm 0", "Perm 1", ... -- one sheet per known permutation; each page
+                                  is graded against that permutation's answer key
+      "No_Perm_Detected"      -- pages where the PERMUT bubble was unreadable;
+                                  answer columns shown but Score left blank
+      "Summary"               -- totals: pages, U-matches, per-permutation counts
 
-    Each scanned page is routed to the sheet matching its OWN detected
-    PERMUT bubble and graded with that permutation's key. Pages whose
-    PERMUT wasn't detected (or doesn't match any known permutation) go to
-    a separate "No_Perm_Detected" sheet, graded against an empty answer
-    key (so Score columns are left blank rather than guessing).
+    Each scanned page is routed to the sheet matching its OWN detected PERMUT
+    value and graded with that permutation's key.  The routing is a pure string
+    match (str(permut_val) == perm_key), so permutation labels must be consistent
+    between the answer file and what the bubble reader outputs.
+
+    correct_answers_by_perm: dict returned by load_correct_answers(), mapping
+    perm_key (str) -> {question_num: set_of_correct_option_letters}.
     """
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
@@ -1350,12 +1556,28 @@ def _build_student_name_lookup(students_df):
 
 
 def _draw_annotated_page(c, r, student_lookup, page_w_pt, page_h_pt):
-    """Draw one result's annotated review page onto reportlab canvas `c`:
-    a rasterized copy of the corrected scan plus vector overlays (header,
-    bubble markup, footer). Shared by write_annotated_pdf (full multi-page
-    generation) and patch_annotated_pdf_page (single-page in-place correction
-    after a manual fix), so a single page can be redrawn without
-    re-rendering the whole PDF.
+    """Draw one exam page with vector annotation overlays onto a reportlab canvas.
+
+    Layout (bottom-to-top in PDF coordinate space):
+      [footer 36pt]  -- detected answer summary + any validation warnings
+      [image area]   -- rasterized corrected scan, aspect-ratio-fitted to A4
+      [header 60pt]  -- status badge, U-number, name, quality metrics
+
+    Coordinate system: PDF origin is BOTTOM-LEFT; image pixels are TOP-LEFT.
+    The helper px_to_pt() converts image (x, y) -> PDF (x_pt, y_pt), flipping
+    the y-axis.  All vector overlays (bubble rectangles, box outlines, text
+    pills) are drawn in PDF point space on top of the raster background.
+
+    Color conventions for answer bubble overlays:
+      GREEN  -- student marks exactly matching the correct set
+      YELLOW -- partial match (some correct marks, no wrong marks)
+      RED    -- wrong or mixed marks
+      BLUE   -- cancel-row marks (student crossed out a bubble)
+      PURPLE -- marks added or removed by a human reviewer after OMR
+
+    Shared by write_annotated_pdf (full batch) and patch_annotated_pdf_page
+    (single-page splice after a manual correction) so a page can be redrawn
+    without regenerating the entire PDF.
     """
     from reportlab.lib.colors import Color
     import io
@@ -1841,16 +2063,25 @@ def patch_annotated_pdf_page(pdf_path, result, students_df, page_index):
 def save_review_cache(all_results, students_df, correct_answers_by_perm,
                        num_questions, num_options, excel_path, pdf_path, cache_path,
                        exam_pdf_path=None, dpi=None):
-    """Persist everything the Review window needs so it can be reopened later
-    (even after restarting the app) without re-running OMR on the source PDF.
+    """Persist all OMR results to a pickle file for later review-session restores.
 
-    The per-page records normally live only in memory for the duration of a
-    run; the bulky parts (`_corrected` scan image, `_mask` student mask) are
-    re-encoded as JPEG/PNG here to keep the cache file a manageable size.
+    What is persisted: all result dicts (with all fields), the student DataFrame,
+    the answer key dict, question/option counts, and the output file paths.
 
-    `exam_pdf_path`/`dpi` (the original scanned PDF and the DPI it was
-    rendered at) are optional so old cache files without them still load --
-    they're only needed to support rescanning a single page later.
+    Why images are re-encoded:
+    The '_corrected' numpy array and '_mask' array are stored as JPEG/PNG bytes
+    rather than raw float32/uint8 arrays.  Raw arrays would be serialised by
+    pickle as full numpy buffers (~3-5 MB per page), making a 100-page cache
+    file 300-500 MB.  JPEG at quality=85 reduces each page to ~100-200 KB with
+    no visible difference for review purposes; PNG (lossless) is used for the
+    binary mask to preserve exact 0/255 values.
+
+    excel_path and pdf_path are stored as basenames only (not full paths) so the
+    cache survives the output folder being moved or renamed.  exam_pdf_path is
+    stored as a full path since it lives outside the output folder.
+
+    exam_pdf_path and dpi are optional for backward-compatibility with cache
+    files written by older versions that did not include these fields.
     """
     import pickle
 
@@ -1891,8 +2122,18 @@ def save_review_cache(all_results, students_df, correct_answers_by_perm,
 
 
 def load_review_cache(cache_path):
-    """Inverse of save_review_cache(): rebuild the run_state dict the Review
-    window needs, decoding the cached page images back into numpy arrays.
+    """Restore a previously saved OMR session from a pickle cache file.
+
+    Inverse of save_review_cache(): decodes the per-page JPEG/PNG bytes back
+    into numpy arrays ('_corrected' and '_mask') and reconstructs the full
+    run_state dict expected by the Review window.
+
+    Output file paths are resolved relative to the cache file's own directory
+    (since they were stored as basenames), so the whole output folder can be
+    moved without breaking path lookups.  The 'cache_path' key in the returned
+    dict is always the absolute path to the cache file itself, ensuring that
+    manual edits made during the review session get written back to the same
+    file rather than creating a new one.
     """
     import pickle
 
@@ -1930,20 +2171,24 @@ def load_review_cache(cache_path):
 
 
 def load_correct_answers(answers_path):
-    """Load correct answers (one key per exam permutation) from Excel/CSV.
+    """Load correct answers for all exam permutations from an Excel/CSV file.
 
-    Required format (column names/values may have surrounding whitespace,
-    which is stripped):
-        Perm | QuestionNum | A | B | C | D | ...
-        0    | 1           | 0 | 1 | 0 | 0
-        0    | 2           | 1 | 1 | 0 | 0
-        1    | 1           | 0 | 1 | 0 | 0
-        ...
-    A 'Perm' column is mandatory: each row's option columns hold 1 (correct)
-    or 0 (incorrect) for that permutation's answer key.
+    The file uses a Perm x QuestionNum matrix format: each row describes one
+    question of one permutation, and each option column (A, B, C, ...) holds
+    1 (correct) or 0 (incorrect) for that question.  Multiple correct options
+    per question are supported for multi-answer scoring.
 
-    Returns: dict mapping permutation key (str, e.g. '0') to that
-    permutation's {question_num: set_of_correct_letters}.
+    Required column names (whitespace around values is stripped automatically):
+        Perm        -- permutation identifier (e.g. 0, 1, 2)
+        QuestionNum -- 1-based question number
+        A, B, C, D, [E, ...] -- 1/0 correctness per option
+
+    Any number of permutations can be present; they are grouped by the 'Perm'
+    column value.  The permutation key is stored as a string so it matches the
+    PERMUT bubble readout (also string) in write_excel's routing step.
+
+    Returns:
+        dict mapping perm_key (str) -> {question_num (int): set_of_correct_letters}
     """
     if answers_path.lower().endswith('.csv'):
         df = pd.read_csv(answers_path)
@@ -1979,22 +2224,29 @@ def load_correct_answers(answers_path):
 
 
 def load_students(students_path):
-    """Load student list from Excel/CSV with flexible column name detection.
-    
-    Accepts multiple formats:
-    
-    Format 1 (UPF official .xls export):
-        IDUSUARI | NIA | NIP | COGNOM1 | COGNOM2 | NOM
-        (header on row 2, with course name as row 1)
-    
-    Format 2 (Standard):
+    """Load and normalize a student list from Excel or CSV.
+
+    Two main supported formats:
+
+    Format 1 -- UPF official .xls export (semicolon-separated or Excel):
+        Row 1: course name (single cell, not a column header)
+        Row 2: IDUSUARI ; NIA ; NIP ; COGNOM1 ; COGNOM2 ; NOM
+        Row 3+: data
+        The IDUSUARI column contains the U-number (e.g. "U123456").
+        NIA, NIP, and any other extra columns are silently dropped.
+
+    Format 2 -- Simple CSV or Excel with conventional column names:
         Nom | Cognom1 | Cognom2 | U_number
-    
-    Format 3 (any reasonable variant):
-        Tolerates case differences and accents in column names.
-    
-    Returns a DataFrame with normalized columns:
-        Nom | Cognom1 | Cognom2 | U_number
+        Column name matching is accent- and case-insensitive.
+
+    The function auto-detects whether the first data row is actually a header
+    (UPF format) by checking if any of the recognized column names appear in
+    that row.  CSV separator (comma vs semicolon) and encoding (UTF-8, Latin-1,
+    cp1252) are also sniffed automatically.
+
+    Returns:
+        DataFrame with columns: Nom, Cognom1, Cognom2, U_number
+        Rows with empty/null U_number are dropped.
     """
     # Pick correct reader based on extension
     ext = students_path.lower().split('.')[-1]
@@ -2117,12 +2369,23 @@ def load_students(students_path):
 # =============================================
 
 def detect_pdf_dpi(pdf_path):
-    """Auto-detect the DPI of a scanned PDF from its embedded image
-    resolution (via `pdfimages -list`), rounded to the nearest common
-    scanner DPI (150/300/600/1200).
+    """Auto-detect the embedded image resolution of a scanned PDF.
 
-    Returns the detected DPI, defaulting to 300 if detection fails for
-    any reason (missing poppler tools, no embedded images, etc.).
+    Why this matters: process_page() rescales every page to REFERENCE_DPI
+    (300) internally, but only AFTER convert_from_path() has already rendered
+    the PDF at `source_dpi`.  If the PDF's embedded images are at 600 DPI and
+    we render at 300 DPI, pdf2image downsamples by 2x and we lose resolution;
+    if we render at 600 DPI when the images are 300 DPI, we get upsampled
+    output that wastes memory and slows down processing.  Matching the render
+    DPI to the PDF's actual image DPI avoids both problems.
+
+    Uses poppler's `pdfimages -list` to read the x-ppi field from the first
+    embedded image.  The median of all images is snapped to the nearest
+    standard scanner DPI (150/300/600/1200) to be robust against minor
+    metadata rounding.
+
+    Returns 300 as a safe default if poppler is unavailable or the PDF has
+    no embedded images (e.g. vector-only or password-protected PDFs).
     """
     try:
         import subprocess
