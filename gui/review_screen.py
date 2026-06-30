@@ -5,7 +5,7 @@ import shutil
 import tempfile
 import time
 
-from PySide6.QtCore import QEvent, QRectF, Qt, QThread, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -150,18 +150,25 @@ class _PreviewRenderWorker(QThread):
 
 
 class _ExpectedAnswersLabel(QLabel):
-    """Preview QLabel that can additionally paint a magenta outline over
+    """Preview QLabel that can additionally paint a diagonal-slash mark over
     every bubble the answer key marks correct, on top of the normal
     (already-rendered) annotated-page pixmap.
 
-    Purely a paint-time overlay -- it never touches the pixmap itself, so
-    the underlying scan is always fully visible and zoom/pan keep working
-    unchanged. Rectangles are stored as fractions (0..1) of the displayed
-    pixmap so they stay correctly placed across zoom levels without being
-    recomputed on every resize.
+    The slash mimics a pen stroke through the bubble (the way a student
+    would mark it), making it immediately recognisable as "this one should
+    be filled".  Blue is used because it is not already consumed by the
+    overlay layer itself (cancel-row blue marks are baked into the PDF
+    raster, not drawn here).
+
+    Bubble extents are stored as page-fractions (0..1) so the slash stays
+    correctly placed across all zoom levels without being recomputed on
+    every resize.
     """
 
-    OVERLAY_COLOR = QColor(255, 0, 255)
+    # Blue matches the cancel-mark colour used in the annotated PDF but is
+    # visually distinct from the magenta/green/red/purple PDF annotations
+    # because it appears as a clean diagonal line, not a rectangle or symbol.
+    OVERLAY_COLOR = QColor(0, 120, 220)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -193,12 +200,15 @@ class _ExpectedAnswersLabel(QLabel):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         pen = QPen(self.OVERLAY_COLOR)
-        pen.setWidth(2)
+        pen.setWidthF(max(1.5, pix_w * 0.0015))  # scales with zoom
+        pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)
         for fx0, fy0, fx1, fy1 in self._overlay_rects:
             x0, y0 = off_x + fx0 * pix_w, off_y + fy0 * pix_h
             x1, y1 = off_x + fx1 * pix_w, off_y + fy1 * pix_h
-            painter.drawRect(QRectF(x0, y0, x1 - x0, y1 - y0))
+            # Diagonal "/" stroke from bottom-left to top-right of the bubble
+            # cell — like a pen mark through the bubble.
+            painter.drawLine(QPointF(x0, y1), QPointF(x1, y0))
         painter.end()
 
 
@@ -474,6 +484,28 @@ class ReviewScreen(QWidget):
         # drag pans it.
         self.preview_scroll.viewport().installEventFilter(self)
         layout.addWidget(self.preview_scroll)
+
+        # Colour legend — colours and symbols mirror those used in the
+        # annotated PDF so the reviewer can decode the overlays at a glance.
+        legend = QLabel(
+            '<span style="font-size:10px;color:#444">'
+            '<span style="background-color:#00BD00;color:white">&nbsp;&#9632;&nbsp;</span>'
+            '&nbsp;Correct&nbsp;&nbsp;'
+            '<span style="background-color:#D4B800;color:white">&nbsp;&#9632;&nbsp;</span>'
+            '&nbsp;Partial&nbsp;&nbsp;'
+            '<span style="background-color:#DB0000;color:white">&nbsp;&#9632;&nbsp;</span>'
+            '&nbsp;Wrong&nbsp;&nbsp;'
+            '<span style="background-color:#0078DB;color:white">&nbsp;&#9632;&nbsp;</span>'
+            '&nbsp;Cancelled&nbsp;&nbsp;'
+            '<span style="background-color:#9400D4;color:white">&nbsp;&#9632;&nbsp;</span>'
+            '&nbsp;Manual edit&nbsp;&nbsp;'
+            '<span style="background-color:#0078DC;color:white">&nbsp;&#9585;&nbsp;</span>'
+            '&nbsp;Expected (key)'
+            '</span>'
+        )
+        legend.setWordWrap(True)
+        legend.setContentsMargins(2, 2, 2, 2)
+        layout.addWidget(legend)
         return group
 
     def eventFilter(self, obj, event):
