@@ -1,222 +1,239 @@
-# OMR Exam Corrector - Installation & Usage Guide
+# OMR Exam Corrector — Installation & Technical Reference
 
-Sistema de correcció automàtica d'examens tipus test escanejats de la UPF.
+## 1. System prerequisites
 
-## 1. Prerequisits del sistema
-
-A més de Python 3.10+, necessites instal·lar **Poppler**:
+In addition to Python 3.10+, you need **Poppler** (the PDF rendering library).
 
 ### macOS
+
 ```bash
 brew install poppler
 ```
 
 ### Ubuntu / Debian
+
 ```bash
-sudo apt update
-sudo apt install -y poppler-utils
+sudo apt update && sudo apt install -y poppler-utils
 ```
 
 ### Windows
-- Descarrega Poppler binaries: https://github.com/oschwartz10612/poppler-windows/releases
-- Afegeix-lo a la variable d'entorn PATH
 
-## 2. Crear entorn virtual i instal·lar dependències
+Download the pre-built Poppler binaries from
+<https://github.com/oschwartz10612/poppler-windows/releases>
+and add the `bin\` subfolder to your `PATH` environment variable.
+
+> The packaged `.exe` already bundles Poppler — you only need this step when
+> running from source.
+
+---
+
+## 2. Create a virtual environment and install dependencies
 
 ```bash
-# 1. Crear venv
+# 1. Create the venv
 python3 -m venv omr_env
 
-# 2. Activar
+# 2. Activate it
 # macOS / Linux:
 source omr_env/bin/activate
 # Windows (PowerShell):
 omr_env\Scripts\Activate.ps1
 
-# 3. Actualitzar pip
-pip install --upgrade pip
-
-# 4. Instal·lar dependències
+# 3. Install all dependencies
 pip install -r requirements.txt
 ```
 
-`requirements.txt` instal·la tant les dependències del motor de correcció
-(`omr_correct.py`) com de la interfície gràfica (`omr_gui.py`, basada en
-PySide6) i el suport per a llistats d'alumnes en format `.xls` antic (`xlrd`).
+`requirements.txt` installs both the OMR engine (`omr_correct.py`) and the
+desktop GUI (`omr_gui.py`, PySide6-based), plus legacy `.xls` support via
+`xlrd`.
 
-> **Nota sobre entorns virtuals**: la carpeta `omr_env` **no és portable**
-> entre ordinadors — conté camins absoluts cap a l'intèrpret de Python
-> original i paquets compilats específics del sistema operatiu. Si canvies
-> d'ordinador, torna a crear l'entorn des de zero amb els passos anteriors
-> (això sí és ràpid, ja que `requirements.txt` ho instal·la tot d'un cop).
-> Poppler s'ha d'instal·lar per separat a cada màquina.
+> **Note on portability**: a virtual environment is not portable between
+> machines — it contains absolute paths to the original Python interpreter
+> and OS-specific compiled packages. If you move to a different machine,
+> recreate the environment from scratch with the steps above. Poppler must
+> be installed separately on each machine.
 
-### Verificar instal·lació
+### Verify the installation
 
 ```bash
-python3 -c "
-import cv2, numpy, pandas, openpyxl, pdf2image, reportlab, PySide6
-print('✓ Core packages OK')
-"
+python -c "import cv2, numpy, pandas, openpyxl, pdf2image, reportlab, PySide6; print('OK')"
 ```
 
-## 3. Format dels fitxers d'entrada
+---
 
-### Llistat d'alumnes (CSV o Excel)
+## 3. Input file formats
 
-Dos formats acceptats:
+### 3.1 Students list (CSV or Excel)
 
-**Format estàndard** — columnes `Nom`, `Cognom1`, `Cognom2`, `U_number`:
+Two formats are accepted:
 
-| Nom | Cognom1 | Cognom2 | U_number |
-|---|---|---|---|
-| Isabel | Expósito | Castro | U214967 |
-| Mikel | Areta | Garcia | U232868 |
-| Alex | Ruiz | López | U232138 |
+**Standard format** — columns `Nom`, `Cognom1`, `Cognom2`, `U_number`:
 
-**Format export oficial UPF** (`.xls` o `.csv`, separat per `;`) — primera fila
-amb el codi de l'assignatura, segona fila amb capçaleres
-`IDUSUARI;NIA;NIP;COGNOM1;COGNOM2;NOM`. El programa detecta automàticament
-aquest format i en descarta les columnes NIA/NIP.
+| Nom   | Cognom1 | Cognom2 | U_number |
+|-------|---------|---------|----------|
+| Alice | Example | Smith   | U000001  |
+| Bob   | Sample  | Jones   | U000002  |
+| Carol | Test    | Brown   | U000003  |
 
-### Respostes correctes (CSV) — amb permutacions
+**UPF official export** (`.xls` or `;`-separated CSV) — first row contains
+the course code, second row contains the column headers
+`IDUSUARI;NIA;NIP;COGNOM1;COGNOM2;NOM`. The app auto-detects this format
+and discards the NIA/NIP columns.
 
-El fitxer de respostes **ha de tenir una columna `Perm`**: una fila per cada
-combinació de permutació + pregunta, amb una columna per opció (`A`, `B`,
-`C`, `D`, ...) amb valor `1` (correcta) o `0` (incorrecta):
+```text
+LSDS2025
+IDUSUARI;NIA;NIP;COGNOM1;COGNOM2;NOM
+u000001;00001;00001;EXAMPLE;SMITH;ALICE
+u000002;00002;00002;SAMPLE;JONES;BOB
+```
+
+### 3.2 Answer key (CSV or Excel) — with permutations
+
+The file **must** have a `Perm` column: one row per (permutation, question)
+pair, with one column per answer option (`A`, `B`, `C`, `D`, …) holding `1`
+(correct) or `0` (incorrect). Multiple correct options per question are
+supported (multi-answer questions with partial credit).
 
 | Perm | QuestionNum | A | B | C | D |
-|---|---|---|---|---|---|
-| 0 | 1 | 0 | 1 | 0 | 0 |
-| 0 | 2 | 1 | 1 | 0 | 0 |
-| 1 | 1 | 0 | 1 | 0 | 0 |
-| 1 | 2 | 1 | 0 | 0 | 1 |
-| 2 | 1 | 1 | 0 | 0 | 0 |
+|------|-------------|---|---|---|---|
+| 0    | 1           | 0 | 1 | 0 | 0 |
+| 0    | 2           | 1 | 1 | 0 | 0 |
+| 1    | 1           | 0 | 0 | 1 | 0 |
+| 1    | 2           | 0 | 1 | 0 | 1 |
+| 2    | 1           | 1 | 0 | 0 | 0 |
 
-Una pregunta amb diverses respostes correctes simplement té un `1` a cada
-columna d'opció correcta (puntuació parcial: veure secció 5).
+Each scanned sheet declares its own permutation via the **PERMUT** bubble on
+the form. The app reads it and grades that sheet with the matching key
+automatically — no manual sorting needed.
 
-Cada full escanejat indica la seva pròpia permutació a la bombolla
-**PERMUT** del formulari — el programa la llegeix i corregeix automàticament
-cada pàgina amb la clau de LA SEVA permutació, no amb una clau única
-compartida.
+---
 
-## 4. Exemples de crida al programa
+## 4. Command-line usage
 
-### Línia de comandes
+### Basic call
 
 ```bash
-python omr_correct.py examens.pdf llistat.csv respostes.csv --questions 10
+python omr_correct.py exams.pdf students.csv answers.csv --questions 10
 ```
+
+### Full options
 
 ```bash
 python omr_correct.py \
-    examens.pdf \                       # PDF amb tots els examens escanejats
-    llistat.csv \                       # CSV/Excel amb el llistat d'alumnes
-    respostes.csv \                     # CSV amb les respostes correctes (amb columna Perm)
-    --questions 10 \                    # Nombre de preguntes (obligatori)
-    --num-options 5 \                   # Opcions per pregunta (defecte: 5; rang 2-10)
-    --output-dir ./resultats \          # Directori de sortida (defecte: ./output)
-    --dpi 0 \                           # 0 = auto-detect (300 o 600). Pots forçar amb --dpi 300
-    --verbose                           # Mode verbose amb més info per debugging
+    exams.pdf \          # multi-page PDF of scanned answer sheets
+    students.csv \       # student list (CSV or Excel)
+    answers.csv \        # answer key with Perm column
+    --questions 10 \     # number of questions to grade (required)
+    --num-options 5 \    # options per question (default 5; range 2–10)
+    --output-dir ./out \ # output folder (default ./output)
+    --dpi 0 \            # 0 = auto-detect (300 or 600); override with e.g. 300
+    --verbose            # extra debug output
 ```
+
+### Examples
 
 ```bash
-# Examen amb 25 preguntes i 4 opcions
-python omr_correct.py exam_25q.pdf llistat.csv respostes_25q.csv -q 25 -n 4
+# 25-question exam with 4 options
+python omr_correct.py exam.pdf students.csv answers.csv -q 25 -n 4
 
-# Diversos examens en directoris separats
-mkdir resultats_parcial1 resultats_parcial2
-python omr_correct.py parcial1.pdf llistat.csv respostes_p1.csv -q 10 -o resultats_parcial1
-python omr_correct.py parcial2.pdf llistat.csv respostes_p2.csv -q 15 -o resultats_parcial2
+# Two separate exams into separate output folders
+python omr_correct.py midterm.pdf students.csv answers_mid.csv -q 10 -o output_midterm
+python omr_correct.py final.pdf   students.csv answers_fin.csv -q 15 -o output_final
 ```
 
-### Interfície gràfica (`omr_gui.py`)
+---
 
-```bash
-python omr_gui.py
-```
-
-Obre una finestra d'escriptori (PySide6) per:
-- Seleccionar el PDF escanejat, el llistat d'alumnes i el fitxer de respostes amb selectors de fitxer
-- Configurar nombre de preguntes, opcions per pregunta i DPI (o deixar auto-detecció)
-- Executar l'anàlisi amb una barra de progrés i una taula que es va omplint pàgina a pàgina
-  (estat, U-number, nom de l'alumne detectat, DNI, permutació, respostes marcades)
-- Un panell de log amb el mateix detall que la versió de línia de comandes
-- En acabar, obrir directament la carpeta de sortida
-
-Internament crida les mateixes funcions de `omr_correct.py` (no és un procés
-separat), executant l'anàlisi en un fil en segon pla perquè la finestra no es
-quedi bloquejada mentre processa.
-
-## 5. Sortides generades
-
-Dins el directori d'output (`./output` per defecte):
+## 5. Output files
 
 ### `results.xlsx`
-Un full per cada permutació trobada al fitxer de respostes (`Perm 0`,
-`Perm 1`, `Perm 2`...), més dos fulls addicionals:
 
-- **`Perm N`**: només les pàgines amb aquella permutació detectada (bombolla
-  PERMUT), corregides amb la clau d'aquella permutació.
-- **`No_Perm_Detected`**: pàgines on no s'ha pogut llegir el PERMUT (o no
-  coincideix amb cap permutació coneguda del fitxer de respostes). Es
-  mostren sense corregir (columnes de nota en blanc) perquè no hi ha manera
-  de saber quina clau els correspon.
-- **`Summary`**: recompte global (total de pàgines, U-numbers trobats/no
-  trobats, pàgines per permutació).
+One sheet per detected permutation (`Perm 0`, `Perm 1`, …) plus:
 
-Cada full té:
-- Una fila per pàgina d'examen
-- Identificació: U-number, **Name / Surname1 / Surname2** (del llistat
-  d'alumnes, segons coincidència per U-number), DNI, PARCIAL, PERMUT, GRUP
-- Respostes detectades: 1/0 per cada opció de cada pregunta, amb columna de
-  puntuació per pregunta (1.0 = correcta completa, puntuació parcial si
-  l'alumne ha marcat només algunes de les respostes correctes sense
-  marcar-ne cap d'incorrecta, 0 en cas contrari)
-- Nota total i nota sobre 10
-- Codis de problema per a casos a revisar (`UNUMBER_NO_MATCH`,
-  `UNUMBER_MISSING`, etc.)
+- **`No_Perm_Detected`** — pages where the PERMUT bubble was not readable or
+  does not match any known permutation. Grades are blank.
+- **`Summary`** — totals: pages processed, U-numbers matched, pages per
+  permutation.
+
+Each permutation sheet contains:
+
+- Student identification: U-number, Name / Surname1 / Surname2 (looked up from
+  the students list), DNI, PARCIAL, PERMUT, GRUP.
+- Per-question answer columns (1 = marked, 0 = not marked) and a per-question
+  score (1.0 = fully correct; partial credit if applicable; 0 otherwise).
+- Total score and grade on a 0–10 scale.
+- Problem-flag codes for pages that need attention.
 
 ### `annotated_review.pdf`
-PDF amb anotacions vectorials:
-- Imatge original de cada examen amb correcció de perspectiva
-- Capçalera amb estat semàfor (verd/groc/vermell)
-- Marques verdes/grogues/vermelles sobre les bombolles segons correctitut
-  (verd = resposta completa correcta, groc = parcialment correcta sense
-  errors, vermell = incorrecta)
-- Etiquetes blaves de cancel·lacions
-- Caixes ID detectades (rectangles taronges) amb el valor llegit de
-  PARCIAL/PERMUT/GRUP en una etiqueta verda damunt la caixa corresponent
 
-Les anotacions són **vectorials**: nítides a qualsevol nivell de zoom.
+One page per successfully processed sheet:
 
-## 6. Resolució de problemes
+- Perspective-corrected scan as background.
+- Header bar (green / yellow / red) with page number, status, U-number,
+  student name, and quality metrics.
+- Coloured vector overlays on every answer bubble:
+  - **Green** — fully correct answer.
+  - **Yellow** — partially correct (some correct options marked, no wrong ones).
+  - **Red** — incorrect (wrong option marked, or correct option missed).
+  - **Blue rectangle** — cancel-row mark (student crossed the bubble out).
+  - **Purple circle** — answer mark added by the reviewer.
+  - **Purple cross** — answer mark removed by the reviewer.
+- Orange boxes around detected ID field areas with a green value label.
+- Purple pill badges for any manually-edited identification fields.
 
-### "Killed" en processament de molts examens
-Si el programa es para amb "Killed" (memòria insuficient):
-- Processa en lots més petits separant el PDF
-- Tanca altres aplicacions per alliberar RAM
-- Considera l'opció `--dpi 300` si abans usaves 600 (en proves amb el mateix
-  full d'examen, 300 DPI dona resultats pràcticament idèntics a 600 DPI amb
-  un cost de processament molt menor)
+### `review_cache.pkl`
 
-### El sistema no detecta algun camp
-- Verifica el PDF anotat per veure què s'està detectant
-- Si la qualitat (`Quality: X%`) és baixa, el problema sol ser:
-  - Escaneig amb molta distorsió → escanejar de nou
-  - Pàgina mal orientada (es detecta automàticament, però per certesa fer escaneig en orientació correcta)
-  - Bombolles molt febles → demanar bolígraf més fort
+Binary session file used by the GUI to reopen a session without re-running
+OCR. Keep it next to `results.xlsx` and `annotated_review.pdf`.
 
-### Totes les pàgines fallen amb `CORNER_ERROR`
-El full escanejat probablement no fa servir la plantilla esperada: el
-programa busca una columna de marcadors negres al marge esquerre i una fila
-de marcadors a la part inferior de la pàgina per orientar-se i localitzar
-files/columnes. Si el full d'examen no té aquests marcadors (p. ex. una
-plantilla diferent), el programa no pot processar-lo. Comprova que el PDF
-escanejat correspon realment al full d'examen estàndard de l'assignatura.
+---
 
-> **Nota:** el sistema no fa OCR de cap mena (ni de noms ni de dígits manuscrits). Tota la identificació
-> de l'alumne (U-number, DNI, PARCIAL, PERMUT, GRUP) es llegeix exclusivament de les bombolles emplenades.
-> Si les bombolles d'identificació estan buides o ambigües, la pàgina es marca per a revisió manual
-> en lloc d'intentar inferir el valor.
+## 6. Partial-credit scoring formula
+
+For each question with **G** correct options out of **N** total:
+
+- Each **correct** option marked: `+1/G`
+- Each **incorrect** option marked: `−1/(N−G)`
+- Question score capped at 0 (no negative per-question contribution)
+
+Leaving a question completely blank scores 0.
+
+---
+
+## 7. Troubleshooting
+
+### All pages fail with `CORNER_ERROR`
+
+The app cannot detect the outer border of the form. Likely causes:
+
+- Wrong exam template (the form must have the UPF bubble-sheet layout with
+  alignment markers on the left margin).
+- Very dark or very light scan — adjust scanner brightness/contrast.
+- Large black border from the scanner lid — crop the PDF before processing.
+
+### Some pages fail with `MARKER_ERROR`
+
+The border was found but the alignment-marker strip could not be located:
+
+- The sheet was placed too far to one side in the scanner.
+- Part of the marker strip is torn, folded, or obscured.
+- Re-scan and use **Rescan this page** in the review screen.
+
+### "Killed" during processing
+
+Insufficient RAM. Workarounds:
+
+- Close other applications.
+- Process the PDF in smaller batches (split with a PDF tool first).
+- Use `--dpi 300` instead of 600 — quality is almost identical at lower cost.
+
+### U-number not detected
+
+- The student may have filled the wrong bubbles (a common mistake is filling
+  a row instead of a column).
+- Correct manually in the review screen's **U-Number** field.
+
+### First `.exe` launch is very slow
+
+Antivirus software deep-scans unfamiliar unsigned executables on first run.
+Wait 1–2 minutes; subsequent launches are much faster. On managed corporate
+machines, ask IT to whitelist the app folder.
