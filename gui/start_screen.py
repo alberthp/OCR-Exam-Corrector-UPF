@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 import omr_correct as omr
 
 # Bump this constant with each meaningful release.
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
 APP_AUTHOR = "Albert Hernansanz (with Claude)"
 APP_EMAIL = "albert.hernansanz@upf.edu"
 

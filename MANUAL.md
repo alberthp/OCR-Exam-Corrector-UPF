@@ -1,6 +1,6 @@
 # OMR Exam Corrector — User Manual
 
-**Version 1.2** · Albert Hernansanz ([albert.hernansanz@upf.edu](mailto:albert.hernansanz@upf.edu))
+**Version 1.3** · Albert Hernansanz ([albert.hernansanz@upf.edu](mailto:albert.hernansanz@upf.edu))
 
 ---
 
@@ -13,11 +13,12 @@
 5. [Review screen — navigating results](#5-review-screen--navigating-results)
 6. [Review screen — correcting a page](#6-review-screen--correcting-a-page)
 7. [Expected-answers overlay (v1.2)](#7-expected-answers-overlay-v12)
-8. [Output files](#8-output-files)
-9. [Reopening a previous session](#9-reopening-a-previous-session)
-10. [Colour conventions in the annotated PDF](#10-colour-conventions-in-the-annotated-pdf)
-11. [Keyboard shortcuts and navigation tips](#11-keyboard-shortcuts-and-navigation-tips)
-12. [Troubleshooting](#12-troubleshooting)
+8. [Exporting a page for a student review request (v1.3)](#8-exporting-a-page-for-a-student-review-request-v13)
+9. [Output files](#9-output-files)
+10. [Reopening a previous session](#10-reopening-a-previous-session)
+11. [Colour conventions in the annotated PDF](#11-colour-conventions-in-the-annotated-pdf)
+12. [Keyboard shortcuts and navigation tips](#12-keyboard-shortcuts-and-navigation-tips)
+13. [Troubleshooting](#13-troubleshooting)
 
 ---
 
@@ -180,21 +181,37 @@ The review screen has three panels:
 
 ### 6.1 Identification fields
 
-The right panel shows the values the OCR read for the current page:
+The right panel shows the values the OCR read for the current page, in this
+order (updated in v1.3 to read top-to-bottom the way a reviewer typically
+checks them):
 
 | Field | Description |
 | ------- | ----------- |
 | **U-Number** | Student identifier (digits only, without the leading "U"). The **Matched student** label updates live as you type. |
 | **DNI** | National ID number as read from the DNI bubbles. |
-| **PARCIAL** | Exam part number (if used). |
-| **PERMUT** | Exam permutation — determines which answer key is applied. |
-| **GRUP** | Student group code. |
+| **Group** | Student group code (the sheet's GRUP bubbles). |
+| **Partial** | Exam part number, if used (the sheet's PARCIAL bubbles). |
+| **Permutation** | Exam permutation — determines which answer key is applied (the sheet's PERMUT bubbles). |
 
 ### 6.2 Answer grid
 
 The grid shows one row per question and one column per answer option. Filled
 cells show the option letter (A, B, C…); empty cells mean no mark. Click any
 cell to toggle that mark on or off.
+
+A cell's text colour tells you where a mark came from:
+
+| Colour | Meaning |
+| -------- | --------- |
+| Default (plain) | The scanner detected this mark — matches what OCR read from the sheet. |
+| **Orange** | You just toggled this cell and haven't clicked **Apply correction** yet. |
+| **Bold purple** | A mark you (or a previous reviewer) set by hand and that has been saved — it doesn't match what the scanner actually detected on the sheet. |
+
+The purple state persists across sessions (it's recomputed from the saved
+pixel data every time the page loads, the same way the purple "reviewer
+added/removed" markers on the annotated PDF are), so a hand-corrected answer
+never gets silently confused with an automatically detected one, even after
+closing and reopening the review.
 
 After editing, click **Apply correction** to save.
 
@@ -220,6 +237,9 @@ annotated PDF:
 - **Purple circle (O)** — an answer mark the reviewer *added*.
 - **Purple cross (X)** — an answer mark the reviewer *removed*.
 - **Purple pill badge** — an identification field edited by hand.
+
+The same orange/purple colouring also appears directly in the answer grid
+itself — see [6.2 Answer grid](#62-answer-grid) above.
 
 The **Manual** column in the pages table shows **Y** for any page that has
 at least one manual change.
@@ -247,7 +267,46 @@ separately.
 
 ---
 
-## 8. Output files
+## 8. Exporting a page for a student review request (v1.3)
+
+When a student formally requests a grade review, you often need to hand
+over just *their* page rather than the whole batch PDF. The **"Export for
+student review request..."** button (bottom of the "Correct this page"
+panel) writes a self-contained, 2-page PDF for the page currently on
+screen:
+
+![Export button](assets/screenshots/08-export-button.png)
+
+1. **Page 1** — the raw scanned page, exactly as filled in by the student,
+   with no annotation layer at all.
+2. **Page 2** — the same page fully annotated: the usual colour-coded
+   overlays (see [section 11](#11-colour-conventions-in-the-annotated-pdf)),
+   the expected-answers overlay (blue diagonal slash) drawn automatically
+   for *every* bubble the answer key marks correct — even on questions the
+   student left blank, not just the ones they attempted — and the colour
+   legend from the preview panel, so the page is self-explanatory without
+   the app open.
+
+![Exported review PDF](assets/screenshots/09-export-pdf-pages.png)
+
+Clicking the button opens a save dialog pre-filled with a suggested
+filename built from the page's identification fields:
+
+```text
+U<u_number>_T<group>_Q<partial>_P<permutation>.pdf
+```
+
+For example, U-number 225659, group 1, partial 2, permutation 2 becomes
+**`U225659_T1_Q2_P2.pdf`**. Any field that couldn't be read is replaced with
+`X` (e.g. `UX` if the U-number wasn't detected) so the filename always stays
+well-formed — pick a different name in the dialog if that happens.
+
+The button is disabled with an explanatory message for pages that failed
+processing and have no scanned image to export.
+
+---
+
+## 9. Output files
 
 All files are written to the output directory you specified (default `./output`).
 
@@ -268,7 +327,7 @@ columns, per-question scores, total score, and grade on a 0–10 scale.
 
 One page per successfully processed exam sheet with perspective-corrected
 scan and all colour-coded vector overlays. See
-[section 10](#10-colour-conventions-in-the-annotated-pdf) for the full
+[section 11](#11-colour-conventions-in-the-annotated-pdf) for the full
 colour legend.
 
 ### `review_cache.pkl`
@@ -277,9 +336,16 @@ Binary session file. Keep it next to `results.xlsx` and
 `annotated_review.pdf` — the app uses their relative paths to locate them.
 If you move the output folder, move all three files together.
 
+### Student review export (v1.3)
+
+A one-off, 2-page PDF generated on demand from the **"Export for student
+review request..."** button — see [section 8](#8-exporting-a-page-for-a-student-review-request-v13).
+Unlike the three files above, it isn't written automatically; you choose its
+name and location each time via a save dialog.
+
 ---
 
-## 9. Reopening a previous session
+## 10. Reopening a previous session
 
 From the **Start screen**, click **Review / edit existing results…** and
 select the `review_cache.pkl` from a previous run. The app will locate
@@ -289,7 +355,7 @@ corrections intact.
 
 ---
 
-## 10. Colour conventions in the annotated PDF
+## 11. Colour conventions in the annotated PDF
 
 The legend at the bottom of the preview panel summarises the colours at a
 glance. Full reference:
@@ -307,14 +373,22 @@ glance. Full reference:
 | **Orange box** | Detected ID field boundary (DNI, PERMUT, GRUP, etc.). |
 | **Green label** | Value read from an ID field, shown above its orange box. |
 | **Purple pill** | Identification field value edited by a reviewer. |
-| **Blue diagonal slash** | Expected correct answer from the answer key (v1.2 overlay). |
+| **Blue diagonal slash** | Expected correct answer from the answer key (v1.2 overlay; also drawn on the annotated page of a v1.3 student review export). |
 | **Header green** | Page OK: U-number matched, answers detected. |
 | **Header yellow** | Page needs review (partial detection or ambiguous U-number). |
 | **Header red** | Page needs manual check (very low quality or no detections). |
 
+This same legend is printed at the bottom of page 2 of a student review
+export (v1.3) — see [section 8](#8-exporting-a-page-for-a-student-review-request-v13).
+
+The **answer grid** in the "Correct this page" panel uses two additional,
+grid-only colours that are *not* part of the annotated-PDF legend above —
+see [6.2 Answer grid](#62-answer-grid): **orange** for a toggle not yet
+saved, and **bold purple** for a saved hand-set mark.
+
 ---
 
-## 11. Keyboard shortcuts and navigation tips
+## 12. Keyboard shortcuts and navigation tips
 
 | Action | How |
 | -------- | ----- |
@@ -328,11 +402,12 @@ glance. Full reference:
 | Save correction | **Apply correction** button. |
 | Discard all changes on page | **Revert to original** (confirmation required). |
 | Re-run OCR on current page | **Rescan this page** (confirmation required). |
+| Export page for a review request | **Export for student review request...** button, then choose a save location. |
 | Back to Start screen | **<< Back to start** button (top-left of review screen). |
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 ### All pages fail with `CORNER_ERROR`
 
@@ -367,7 +442,7 @@ students list. Check:
 Check that:
 
 - The current page's PERMUT bubble was read correctly (shown in the
-  **PERMUT** field on the right panel).
+  **Permutation** field on the right panel).
 - The answer key contains an entry for that permutation (check the `Perm`
   values in your answers file).
 
@@ -377,6 +452,14 @@ The app is copying the updated files back to a cloud-synced folder (Google
 Drive, OneDrive, etc.). The local save is already done — data is safe. You
 can navigate to other pages and keep working while the sync runs in the
 background.
+
+### "Export for student review request..." is greyed out, or shows an error
+
+The button is disabled whenever the current page failed processing (no
+scanned image to export — see [4.4 Status codes](#44-status-codes)). If it's
+enabled but the export fails, an error dialog explains why (e.g. the chosen
+save location isn't writable); the exported file is otherwise independent of
+`results.xlsx`/`annotated_review.pdf` and can simply be retried.
 
 ### First launch of the `.exe` is very slow
 
@@ -388,16 +471,21 @@ managed/corporate machines, ask IT to whitelist the application folder.
 
 ## Appendix — Screenshots needed
 
-> The seven screenshots below need to be captured from the running
-> application and saved to `assets/screenshots/` with the exact filenames
-> listed. The table describes exactly what to show in each one.
+> The screenshots below need to be captured from the running application and
+> saved to `assets/screenshots/` with the exact filenames listed. The table
+> describes exactly what to show in each one. `01-start-screen.png` already
+> exists but was taken on v1.2 (the footer reads "v1.2") — retake it so the
+> footer reads **v1.3**.
 
 | File | Screen | What to show |
 | ------ | -------- | ----------- |
-| `01-start-screen.png` | Start | Full window at launch, both main buttons visible. |
+| `01-start-screen.png` | Start | Full window at launch, both main buttons visible, footer showing **v1.3**. *(needs retaking — currently v1.2)* |
 | `02-new-exam-form.png` | New exam | Form with all four file fields filled in, before clicking Run. |
 | `03-analysis-running.png` | New exam | Mid-run: progress bar partially filled, several rows in the table. |
 | `04-review-screen.png` | Review | Full window with an annotated page loaded, overlay **off**. |
-| `05-correction-panel.png` | Review | Right panel close-up: U-Number field filled, answer grid visible. |
+| `05-correction-panel.png` | Review | Right panel close-up: fields in the new order (U-Number, DNI, Group, Partial, Permutation), answer grid visible. |
 | `06-expected-overlay.png` | Review | Same page as `04` but **"Show expected answers" toggled on** (blue slashes visible). |
 | `07-legend.png` | Review | Crop of the legend strip at the bottom of the preview panel. |
+| `08-export-button.png` | Review | Right panel close-up showing the **"Export for student review request..."** button, plus the save dialog it opens with the suggested filename visible. |
+| `09-export-pdf-pages.png` | Exported PDF | Both pages of one exported student-review PDF side by side (or stacked): page 1 the plain scan, page 2 the annotated page with the expected-answers overlay and legend visible in the footer. |
+| `10-answer-grid-colours.png` | Review | Close-up of the answer grid showing all three cell states at once if possible: a plain (auto-detected) mark, an **orange** unsaved toggle, and a **bold purple** saved manual mark. |

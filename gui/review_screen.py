@@ -1,6 +1,7 @@
 """Review/correction screen: step through annotated pages and fix mismatches."""
 
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -231,6 +232,12 @@ class ReviewScreen(QWidget):
     # Revert, or Rescan hasn't fully reached the output folder yet.
     UNSAVED_STYLE = "background-color: orange; color: black;"
 
+    # Answers-grid cell colours (see _style_answer_item). Orange matches
+    # UNSAVED_STYLE above; purple matches the "Manual edit" colour already
+    # used for reviewer changes in the annotated PDF and the preview legend.
+    MANUAL_UNSAVED_COLOR = QColor(255, 165, 0)
+    MANUAL_PERSISTED_COLOR = QColor(148, 0, 212)
+
     PREVIEW_DPI = 200  # rendered once per page; zoom rescales this cached pixmap
     ZOOM_MIN = 0.25
     ZOOM_MAX = 4.0
@@ -270,6 +277,10 @@ class ReviewScreen(QWidget):
         # user edit (QLineEdit.setText() fires textChanged either way).
         self._loading_form = False
         self._scratch_dir = None
+        # (question, option) cells toggled in the answers grid since the page
+        # was last loaded/saved -- drives the "unsaved edit" orange styling
+        # in _style_answer_item(); cleared whenever _load_answers_grid() runs.
+        self._session_toggled_cells = set()
         # Tracks which pdf page index the visible preview was last asked to
         # show, so a render that finishes after the user has already
         # navigated elsewhere doesn't clobber the (now wrong) preview.
@@ -554,9 +565,9 @@ class ReviewScreen(QWidget):
         self.edit_grup = QLineEdit()
         form.addRow("U-Number:", self.edit_u_number)
         form.addRow("DNI:", self.edit_dni)
-        form.addRow("PARCIAL:", self.edit_parcial)
-        form.addRow("PERMUT:", self.edit_permut)
-        form.addRow("GRUP:", self.edit_grup)
+        form.addRow("Group:", self.edit_grup)
+        form.addRow("Partial:", self.edit_parcial)
+        form.addRow("Permutation:", self.edit_permut)
         layout.addLayout(form)
 
         self.matched_student_label = QLabel("Matched student: -")
@@ -590,6 +601,10 @@ class ReviewScreen(QWidget):
         btn_row.addWidget(self.revert_btn)
         btn_row.addWidget(self.rescan_btn)
         layout.addLayout(btn_row)
+
+        self.export_review_btn = QPushButton("Export for student review request...")
+        self.export_review_btn.clicked.connect(self._export_student_review_pdf)
+        layout.addWidget(self.export_review_btn)
         return group
 
     # ----- Page loading -----
@@ -812,7 +827,52 @@ class ReviewScreen(QWidget):
                 f"This page failed processing (status: {r.get('status', '?')}) "
                 f"and has no bubble data to correct.")
 
+    def _auto_detected_marks(self, adata):
+        """Options the OCR fill-ratio actually detected for one question.
+
+        Mirrors the added/removed comparison in
+        omr_correct._draw_annotated_page() (current 'marks' vs. the raw
+        ans_fills/can_fills pixel data, which manual edits never touch) so
+        the answers grid can tell "OCR agrees with what's shown" apart from
+        "a reviewer set this by hand" without needing a separate persisted
+        flag -- it survives save/reload for free since it's derived from
+        data already stored on the result.
+        """
+        col_x = adata.get('col_x', [])
+        af = adata.get('ans_fills', [])
+        cf = adata.get('can_fills', [])
+        auto = set()
+        for oi in range(len(col_x)):
+            ans_marked = oi < len(af) and af[oi] > omr.FILL_THRESHOLD_ANS
+            can_marked = oi < len(cf) and cf[oi] > omr.FILL_THRESHOLD_ANS
+            if ans_marked and not can_marked:
+                auto.add(omr.OPTION_LABELS[oi])
+        return auto
+
+    def _style_answer_item(self, item, q, opt, marked, auto_marks):
+        """Colour one answers-grid cell to distinguish OCR-detected marks
+        from reviewer changes: orange while a toggle is applied but not yet
+        saved (matches Apply's UNSAVED_STYLE), bold purple once saved as a
+        mark the scanner didn't actually detect (matches the "Manual edit"
+        purple used elsewhere in the annotated PDF/legend), plain otherwise.
+        """
+        font = item.font()
+        if marked and (q, opt) in self._session_toggled_cells:
+            item.setForeground(self.MANUAL_UNSAVED_COLOR)
+            font.setBold(False)
+        elif marked and opt not in auto_marks:
+            item.setForeground(self.MANUAL_PERSISTED_COLOR)
+            font.setBold(True)
+        else:
+            item.setData(Qt.ForegroundRole, None)
+            font.setBold(False)
+        item.setFont(font)
+
     def _load_answers_grid(self, r):
+        # A fresh page load discards any in-progress (not-yet-applied) toggle
+        # highlighting left over from whatever page was showing before.
+        self._session_toggled_cells = set()
+
         answers = r.get('answers', {})
         self.answers_table.setColumnCount(self.num_options)
         self.answers_table.setHorizontalHeaderLabels(omr.OPTION_LABELS[:self.num_options])
@@ -821,11 +881,15 @@ class ReviewScreen(QWidget):
             [f"Q{q}" for q in range(1, self.num_questions + 1)])
         opts = omr.OPTION_LABELS[:self.num_options]
         for qi, q in enumerate(range(1, self.num_questions + 1)):
-            marks = answers.get(q, {}).get('marks', set())
+            adata = answers.get(q, {})
+            marks = adata.get('marks', set())
+            auto_marks = self._auto_detected_marks(adata)
             for oi, opt in enumerate(opts):
-                item = QTableWidgetItem(opt if opt in marks else '')
+                marked = opt in marks
+                item = QTableWidgetItem(opt if marked else '')
                 item.setTextAlignment(Qt.AlignCenter)
                 self.answers_table.setItem(qi, oi, item)
+                self._style_answer_item(item, q, opt, marked, auto_marks)
 
     def _update_matched_student_preview(self):
         u_clean = self.edit_u_number.text().strip().upper().replace('U', '')
@@ -844,7 +908,12 @@ class ReviewScreen(QWidget):
     def _toggle_answer_cell(self, row, col):
         item = self.answers_table.item(row, col)
         opt = omr.OPTION_LABELS[col]
-        item.setText('' if item.text() == opt else opt)
+        q = row + 1
+        marked = item.text() != opt
+        item.setText(opt if marked else '')
+        self._session_toggled_cells.add((q, opt))
+        adata = self._current_result().get('answers', {}).get(q, {})
+        self._style_answer_item(item, q, opt, marked, self._auto_detected_marks(adata))
         self._mark_dirty()
 
     def _collect_marks_from_grid(self):
@@ -1171,3 +1240,53 @@ class ReviewScreen(QWidget):
         if page_index == self.current_index:
             self._render_preview(new_r)
         self.status_label.setText("Page rescanned.")
+
+    # ----- Export single-student review PDF -----
+
+    def _default_review_export_name(self, r):
+        """U<u_number>_T<grup>_Q<parcial>_P<permut>.pdf, e.g. U225659_T1_Q2_P2.pdf.
+
+        Falls back to 'X' for any field that's missing/unreadable rather than
+        leaving a blank segment, so the filename stays well-formed even for
+        a page that hasn't been fully identified yet.
+        """
+        def part(prefix, value):
+            s = str(value).strip() if value not in (None, '') else ''
+            return f"{prefix}{s}" if s else f"{prefix}X"
+
+        u_clean = str(r.get('u_number', '') or '').split('|')[0].strip().upper().replace('U', '')
+        name = "_".join([
+            part('U', u_clean),
+            part('T', r.get('grup')),
+            part('Q', r.get('parcial')),
+            part('P', r.get('permut')),
+        ]) + '.pdf'
+        # OCR-read fields are normally just digits, but guard against
+        # characters Windows/macOS forbid in filenames so the save dialog
+        # below doesn't silently reject the suggested name.
+        return re.sub(r'[\\/:*?"<>|]', '_', name)
+
+    def _export_student_review_pdf(self):
+        r = self._current_result()
+        if r.get('_corrected') is None:
+            QMessageBox.information(
+                self, "No scan available",
+                "This page failed processing and has no scanned image to export.")
+            return
+
+        default_name = self._default_review_export_name(r)
+        start_dir = os.path.dirname(self.synced_pdf_path) if self.synced_pdf_path else ''
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export student review PDF",
+            os.path.join(start_dir, default_name), "PDF files (*.pdf)")
+        if not path:
+            return
+
+        try:
+            omr.export_student_review_pdf(r, path, self.students_df,
+                                           correct_answers_by_perm=self.correct_answers_by_perm)
+        except Exception as e:
+            QMessageBox.critical(self, "Could not export PDF", str(e))
+            return
+
+        self.status_label.setText(f"Exported review PDF: {os.path.basename(path)}")

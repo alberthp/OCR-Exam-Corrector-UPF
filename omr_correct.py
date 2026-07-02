@@ -1555,7 +1555,81 @@ def _build_student_name_lookup(students_df):
     return student_lookup
 
 
-def _draw_annotated_page(c, r, student_lookup, page_w_pt, page_h_pt):
+def _draw_plain_scan_page(c, r, page_w_pt, page_h_pt):
+    """Draw just the perspective-corrected scan, centered on the page, with
+    no header/footer/overlays -- the "as scanned" copy of a page for a
+    formal grade-review request, before any grading annotation is added.
+
+    Uses the same image-fit math as _draw_annotated_page() (margin, aspect
+    fit) so the scan lines up identically across both pages of the export.
+    """
+    import io
+    from reportlab.lib.utils import ImageReader
+
+    corr = r.get('_corrected')
+    if corr is None:
+        return
+
+    img_h, img_w = corr.shape[:2]
+    target_h = 1700
+    if img_h > target_h:
+        scale = target_h / img_h
+        new_w = int(img_w * scale)
+        img_for_pdf = cv2.resize(corr, (new_w, target_h), interpolation=cv2.INTER_AREA)
+    else:
+        img_for_pdf = corr
+
+    rgb = cv2.cvtColor(img_for_pdf, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(rgb)
+
+    margin = 8
+    avail_w = page_w_pt - 2 * margin
+    avail_h = page_h_pt - 2 * margin
+    img_aspect = img_for_pdf.shape[1] / img_for_pdf.shape[0]
+    page_aspect = avail_w / avail_h
+    if img_aspect > page_aspect:
+        draw_w = avail_w
+        draw_h = avail_w / img_aspect
+    else:
+        draw_h = avail_h
+        draw_w = avail_h * img_aspect
+    img_x_pt = (page_w_pt - draw_w) / 2
+    img_y_pt = (page_h_pt - draw_h) / 2
+
+    img_buf = io.BytesIO()
+    pil_img.save(img_buf, format='JPEG', quality=90)
+    img_buf.seek(0)
+    c.drawImage(ImageReader(img_buf), img_x_pt, img_y_pt, width=draw_w, height=draw_h)
+    c.showPage()
+
+
+def export_student_review_pdf(result, output_path, students_df=None,
+                                correct_answers_by_perm=None):
+    """Write a 2-page PDF for a single student's grade-review request.
+
+    Page 1 is the raw scanned page with no annotation layer (what the
+    student actually filled in); page 2 is the same page with the full
+    grading annotation layer (as shown in annotated_review.pdf), plus --
+    when correct_answers_by_perm is given -- the expected-answer overlay
+    and colour legend, so a reviewer handling the request has everything
+    needed without opening the full batch PDF or the review GUI.
+    """
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import A4
+
+    PAGE_W_PT, PAGE_H_PT = A4
+    student_lookup = _build_student_name_lookup(students_df)
+
+    c = canvas.Canvas(output_path, pagesize=A4)
+    _draw_plain_scan_page(c, result, PAGE_W_PT, PAGE_H_PT)
+    _draw_annotated_page(c, result, student_lookup, PAGE_W_PT, PAGE_H_PT,
+                          correct_answers_by_perm=correct_answers_by_perm)
+    c.save()
+    return output_path
+
+
+def _draw_annotated_page(c, r, student_lookup, page_w_pt, page_h_pt,
+                          correct_answers_by_perm=None):
     """Draw one exam page with vector annotation overlays onto a reportlab canvas.
 
     Layout (bottom-to-top in PDF coordinate space):
@@ -1578,6 +1652,13 @@ def _draw_annotated_page(c, r, student_lookup, page_w_pt, page_h_pt):
     Shared by write_annotated_pdf (full batch) and patch_annotated_pdf_page
     (single-page splice after a manual correction) so a page can be redrawn
     without regenerating the entire PDF.
+
+    correct_answers_by_perm: optional (as returned by load_correct_answers());
+    when given, additionally draws a blue diagonal-slash "expected answer"
+    overlay over every bubble the key marks correct for this page's
+    permutation, and a colour legend in the footer -- used by
+    export_student_review_pdf() for a single-student review copy. Regular
+    batch/patch callers omit it, so annotated_review.pdf is unaffected.
     """
     from reportlab.lib.colors import Color
     import io
@@ -1605,7 +1686,15 @@ def _draw_annotated_page(c, r, student_lookup, page_w_pt, page_h_pt):
         return
 
     img_h, img_w = corr.shape[:2]
-    
+
+    # The header/footer bars below are opaque rectangles painted OVER the
+    # full-bleed image, not layout boxes the image is fit inside -- so
+    # anything that grows the footer (the legend strip) must also shrink the
+    # image's available height by the same amount, or it silently starts
+    # covering real bubble rows instead of the sheet's blank bottom margin.
+    show_legend = bool(correct_answers_by_perm)
+    legend_extra_h = 14 if show_legend else 0
+
     # ========================================================
     # 1. Background image: the corrected page (raster)
     # ========================================================
@@ -1618,18 +1707,21 @@ def _draw_annotated_page(c, r, student_lookup, page_w_pt, page_h_pt):
         img_for_pdf = cv2.resize(corr, (new_w, target_h), interpolation=cv2.INTER_AREA)
     else:
         img_for_pdf = corr
-    
+
     # Convert BGR to RGB for PIL
     rgb = cv2.cvtColor(img_for_pdf, cv2.COLOR_BGR2RGB)
     pil_img = Image.fromarray(rgb)
-    
+
     # Compute the image's position on the PDF page (centered, full A4)
     # We work in PDF coordinates (points, origin bottom-left)
-    # Page area available: A4 minus margins
+    # Page area available: A4 minus margins. Sized exactly as the regular
+    # (no-legend) pipeline -- legend_extra_h is applied purely as a vertical
+    # shift below, not by shrinking the fit, so this size/aspect math is
+    # identical either way.
     margin = 8  # pts
     avail_w = PAGE_W_PT - 2 * margin
     avail_h = PAGE_H_PT - 2 * margin
-    
+
     # Fit image within A4 maintaining aspect ratio
     img_aspect = img_for_pdf.shape[1] / img_for_pdf.shape[0]
     page_aspect = avail_w / avail_h
@@ -1639,11 +1731,15 @@ def _draw_annotated_page(c, r, student_lookup, page_w_pt, page_h_pt):
     else:
         draw_h = avail_h
         draw_w = avail_h * img_aspect
-    
-    # Position image centered
+
+    # Position image centered, then shifted up by legend_extra_h so the
+    # enlarged footer hides exactly the same footer-height's worth of image
+    # as the regular 36pt footer does -- not 14pt more. The image simply
+    # extends a little further up behind the opaque header at the top,
+    # which already covers far more than that either way.
     img_x_pt = (PAGE_W_PT - draw_w) / 2
-    img_y_pt = (PAGE_H_PT - draw_h) / 2
-    
+    img_y_pt = (PAGE_H_PT - draw_h) / 2 + legend_extra_h
+
     # Save image to in-memory buffer and draw on PDF
     img_buf = io.BytesIO()
     pil_img.save(img_buf, format='JPEG', quality=80)
@@ -1785,6 +1881,19 @@ def _draw_annotated_page(c, r, student_lookup, page_w_pt, page_h_pt):
         c.line(x_pt - bubble_hw_pt, y_pt - bubble_hh_pt, x_pt + bubble_hw_pt, y_pt + bubble_hh_pt)
         c.line(x_pt - bubble_hw_pt, y_pt + bubble_hh_pt, x_pt + bubble_hw_pt, y_pt - bubble_hh_pt)
 
+    def draw_expected_slash(cx_px, cy_px, color, line_w=0.9):
+        """Diagonal '/' pen-stroke over a bubble the answer key marks correct.
+
+        Mirrors the "Show expected answers" overlay in the review GUI
+        (gui/review_screen.py's _ExpectedAnswersLabel) so the exported page
+        reads the same way.
+        """
+        x0, y0 = px_to_pt(cx_px - BUBBLE_HALF_WIDTH, cy_px + BUBBLE_HALF_HEIGHT)
+        x1, y1 = px_to_pt(cx_px + BUBBLE_HALF_WIDTH, cy_px - BUBBLE_HALF_HEIGHT)
+        c.setStrokeColor(color)
+        c.setLineWidth(line_w)
+        c.line(x0, y0, x1, y1)
+
     # --- Annotate ID field bubbles ---
     id_rows = r.get('_id_rows')
     median_sp = r.get('_median_sp', 50)
@@ -1885,7 +1994,36 @@ def _draw_annotated_page(c, r, student_lookup, page_w_pt, page_h_pt):
             elif opt in removed:
                 # Scanner detected this mark; reviewer cancelled it by hand.
                 draw_bubble_cross(col_x[oi], ay, PURPLE, line_w=0.9)
-    
+
+    # --- Expected-answer overlay (opt-in: only when the caller passes the
+    # answer key, e.g. the single-student review export) -- drawn from the
+    # key directly rather than inside the loop above, since a question with
+    # no student marks would otherwise be skipped entirely by the
+    # `if not current_marks and not removed: continue` short-circuit, and a
+    # blank answer to a question the key marks correct is exactly the case
+    # a reviewer most needs to see. ---
+    if correct_answers_by_perm:
+        permut_val = r.get('permut')
+        correct_by_q = (correct_answers_by_perm.get(str(permut_val))
+                         if permut_val is not None else None)
+        if correct_by_q:
+            for qn, correct_opts in correct_by_q.items():
+                if not correct_opts:
+                    continue
+                adata = answers.get(qn)
+                if not adata:
+                    continue
+                col_x = adata.get('col_x', [])
+                ay = adata.get('ans_y')
+                if ay is None:
+                    continue
+                for opt in correct_opts:
+                    if opt not in OPTION_LABELS:
+                        continue
+                    oi = OPTION_LABELS.index(opt)
+                    if oi < len(col_x):
+                        draw_expected_slash(col_x[oi], ay, BLUE, line_w=0.9)
+
     # --- Annotate detected ID boxes ---
     boxes = r.get('_detected_boxes', {})
     permut_raw = r.get('permut')
@@ -1950,13 +2088,17 @@ def _draw_annotated_page(c, r, student_lookup, page_w_pt, page_h_pt):
     # ========================================================
     # 5. FOOTER with answer summary
     # ========================================================
-    footer_h_pt = 36
+    # The colour legend (opt-in, see correct_answers_by_perm/legend_extra_h
+    # above -- the image was already shrunk to make room for this) gets an
+    # extra strip of its own below the usual 36pt content, which is already
+    # tight.
+    footer_h_pt = 36 + legend_extra_h
     c.setFillColor(GRAY_LIGHT)
     c.rect(0, 0, PAGE_W_PT, footer_h_pt, fill=1, stroke=0)
     c.setStrokeColor(GRAY)
     c.setLineWidth(0.5)
     c.line(0, footer_h_pt, PAGE_W_PT, footer_h_pt)
-    
+
     ans_strs = []
     for qn, adata in sorted(answers.items()):
         marks = adata.get('marks', set())
@@ -1965,19 +2107,42 @@ def _draw_annotated_page(c, r, student_lookup, page_w_pt, page_h_pt):
     ans_summary = "  ".join(ans_strs[:20])
     if len(ans_strs) > 20:
         ans_summary += f"  ... (+{len(ans_strs)-20} more)"
-    
+
     c.setFillColor(GRAY_DARK)
     c.setFont('Helvetica-Bold', 7)
-    c.drawString(10, 22, "Answers detected:")
+    c.drawString(10, 22 + legend_extra_h, "Answers detected:")
     c.setFillColor(GREEN)
     c.setFont('Helvetica', 7)
-    c.drawString(10, 12, ans_summary or "(none)")
-    
+    c.drawString(10, 12 + legend_extra_h, ans_summary or "(none)")
+
     issues = r.get('validation_issues', [])
     if issues:
         c.setFillColor(RED)
         c.setFont('Helvetica', 6)
-        c.drawString(10, 3, "WARNINGS: " + "; ".join(issues)[:150])
+        c.drawString(10, 3 + legend_extra_h, "WARNINGS: " + "; ".join(issues)[:150])
+
+    if show_legend:
+        # Mirrors the colour legend shown under the preview panel in the
+        # review GUI (gui/review_screen.py's _build_preview_panel), so the
+        # exported page is self-explanatory without the app open.
+        legend_items = [
+            (GREEN, 'Correct'), (YELLOW, 'Partial'), (RED, 'Wrong'),
+            (BLUE, 'Cancelled'), (PURPLE, 'Manual edit'),
+        ]
+        lx, ly = 10, 4
+        swatch = 7
+        c.setFont('Helvetica', 6)
+        for color, label in legend_items:
+            c.setFillColor(color)
+            c.rect(lx, ly, swatch, swatch, fill=1, stroke=0)
+            c.setFillColor(GRAY_DARK)
+            c.drawString(lx + swatch + 2, ly + 1, label)
+            lx += swatch + 2 + c.stringWidth(label, 'Helvetica', 6) + 10
+        c.setStrokeColor(BLUE)
+        c.setLineWidth(1.1)
+        c.line(lx, ly, lx + swatch, ly + swatch)
+        c.setFillColor(GRAY_DARK)
+        c.drawString(lx + swatch + 2, ly + 1, "Expected (key)")
 
     c.showPage()
 
