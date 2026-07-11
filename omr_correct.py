@@ -2456,7 +2456,7 @@ def patch_annotated_pdf_page(pdf_path, result, students_df, page_index):
 
 def save_review_cache(all_results, students_df, correct_answers_by_perm,
                        num_questions, num_options, excel_path, pdf_path, cache_path,
-                       exam_pdf_path=None, dpi=None):
+                       exam_pdf_path=None, dpi=None, exam_type=None):
     """Persist all OMR results to a pickle file for later review-session restores.
 
     What is persisted: all result dicts (with all fields), the student DataFrame,
@@ -2474,8 +2474,9 @@ def save_review_cache(all_results, students_df, correct_answers_by_perm,
     cache survives the output folder being moved or renamed.  exam_pdf_path is
     stored as a full path since it lives outside the output folder.
 
-    exam_pdf_path and dpi are optional for backward-compatibility with cache
-    files written by older versions that did not include these fields.
+    exam_pdf_path, dpi and exam_type are optional for backward-compatibility
+    with cache files written by older versions that did not include these
+    fields.
     """
     import pickle
 
@@ -2509,6 +2510,9 @@ def save_review_cache(all_results, students_df, correct_answers_by_perm,
         # "stays next to the cache" guarantee to lean on.
         'exam_pdf_path': exam_pdf_path,
         'dpi': dpi,
+        # Whole-run setting (Midterm/Final/Retake, see email_utils.EXAM_TYPES)
+        # substituted into review-PDF emails via {exam_type}.
+        'exam_type': exam_type,
     }
     with open(cache_path, 'wb') as f:
         pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -2561,6 +2565,7 @@ def load_review_cache(cache_path):
         'pdf_path': os.path.join(cache_dir, payload['pdf_filename']),
         'exam_pdf': payload.get('exam_pdf_path'),
         'dpi': payload.get('dpi'),
+        'exam_type': payload.get('exam_type'),
     }
 
 

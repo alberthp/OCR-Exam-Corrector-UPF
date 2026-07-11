@@ -13,6 +13,7 @@ corrupted settings file crashed the whole email feature.
 """
 
 import json
+import os
 
 import pytest
 
@@ -80,7 +81,7 @@ def test_template_fields_for_page_empty_inputs():
     fields = emu.template_fields_for_page({}, None)
     assert fields == {
         "nom": "", "cognom1": "", "cognom2": "", "u_number": "",
-        "dni": "", "grup": "", "parcial": "", "permutacio": "",
+        "dni": "", "grup": "", "parcial": "", "permutacio": "", "exam_type": "",
     }
 
 
@@ -97,6 +98,15 @@ def test_template_fields_for_page_pulls_from_matched_student():
     fields = emu.template_fields_for_page(r, student)
     assert fields["nom"] == "Alice"
     assert fields["permutacio"] == "2"
+
+
+def test_template_fields_for_page_includes_exam_type():
+    fields = emu.template_fields_for_page({}, None, exam_type="Retake")
+    assert fields["exam_type"] == "Retake"
+
+
+def test_exam_types_constant():
+    assert emu.EXAM_TYPES == ["Midterm", "Final", "Retake"]
 
 
 # ----- Settings persistence -----
@@ -137,6 +147,61 @@ def test_settings_file_wrong_json_type_falls_back_to_defaults(isolated_email_con
 
     settings = emu.load_email_settings()
     assert settings["address"] == ""
+
+
+# ----- Body template .txt file -----
+
+def test_load_body_template_defaults_when_no_file_exists(isolated_email_config):
+    assert emu.load_body_template() == emu.DEFAULT_BODY_TEMPLATE
+
+
+def test_save_and_load_body_template_round_trip(isolated_email_config):
+    emu.save_body_template("Custom body {nom}")
+    assert emu.load_body_template() == "Custom body {nom}"
+
+
+def test_body_template_is_a_plain_txt_file_not_inside_the_json(isolated_email_config):
+    """The whole point of splitting it out: it must be directly editable
+    with a plain text editor, not buried in a JSON blob."""
+    emu.save_body_template("Custom body {nom}")
+    txt_path = isolated_email_config / "email_body_template.txt"
+    assert txt_path.exists()
+    assert txt_path.read_text(encoding="utf-8") == "Custom body {nom}"
+
+
+def test_save_email_settings_does_not_duplicate_body_template_into_json(isolated_email_config):
+    settings = emu.load_email_settings()
+    settings["body_template"] = "Custom body {nom}"
+    emu.save_email_settings(settings)
+
+    settings_path = isolated_email_config / "email_settings.json"
+    on_disk = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert "body_template" not in on_disk
+
+    reloaded = emu.load_email_settings()
+    assert reloaded["body_template"] == "Custom body {nom}"
+
+
+def test_legacy_json_body_template_migrates_to_txt_file(isolated_email_config):
+    """Versions before the .txt file existed stored body_template inside
+    email_settings.json -- a settings file left over from one of those
+    must not silently lose its custom template the first time this newer
+    code reads it."""
+    settings_path = isolated_email_config / "email_settings.json"
+    settings_path.write_text(
+        json.dumps({"address": "test@upf.edu", "body_template": "Old-style {nom}"}),
+        encoding="utf-8")
+
+    settings = emu.load_email_settings()
+    assert settings["body_template"] == "Old-style {nom}"
+    assert (isolated_email_config / "email_body_template.txt").read_text(encoding="utf-8") == "Old-style {nom}"
+
+
+def test_open_body_template_file_creates_default_file_if_missing(isolated_email_config, monkeypatch):
+    monkeypatch.setattr(os, "startfile", lambda p: None, raising=False)
+    path = emu.open_body_template_file()
+    assert os.path.exists(path)
+    assert emu.load_body_template() == emu.DEFAULT_BODY_TEMPLATE
 
 
 def test_config_dir_is_never_the_project_folder():

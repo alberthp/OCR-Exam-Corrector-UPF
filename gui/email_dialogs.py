@@ -108,7 +108,23 @@ class EmailSettingsDialog(QDialog):
         self.subject_edit = QLineEdit()
         layout.addWidget(self.subject_edit)
 
-        layout.addWidget(QLabel("Body template:"))
+        body_row = QHBoxLayout()
+        body_row.addWidget(QLabel("Body template:"))
+        body_row.addStretch()
+        open_file_btn = QPushButton("Open template file...")
+        open_file_btn.setToolTip(
+            "Opens the body template as a plain .txt file in your default "
+            "text editor. Editing it there and saving updates the same "
+            "template used here -- click \"Reload from file\" after to "
+            "pull those changes into this box.")
+        open_file_btn.clicked.connect(self._open_template_file)
+        body_row.addWidget(open_file_btn)
+        reload_btn = QPushButton("Reload from file")
+        reload_btn.setToolTip("Re-reads the body template .txt file, discarding any unsaved edits in the box below.")
+        reload_btn.clicked.connect(self._reload_body_template)
+        body_row.addWidget(reload_btn)
+        layout.addLayout(body_row)
+
         self.body_edit = QTextEdit()
         layout.addWidget(self.body_edit, stretch=1)
 
@@ -144,6 +160,17 @@ class EmailSettingsDialog(QDialog):
         self.password_edit.setPlaceholderText(
             "(leave blank to keep the saved password)" if self._had_saved_password
             else "paste the 16-character App Password")
+
+    def _open_template_file(self):
+        try:
+            path = emu.open_body_template_file()
+        except Exception as e:
+            QMessageBox.critical(self, "Could not open template file", str(e))
+            return
+        self.test_status_label.setText(f"Opened {path} -- click \"Reload from file\" after saving it.")
+
+    def _reload_body_template(self):
+        self.body_edit.setPlainText(emu.load_body_template())
 
     def _test_connection(self):
         address = self.address_edit.text().strip()

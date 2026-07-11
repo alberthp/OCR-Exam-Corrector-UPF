@@ -9,11 +9,12 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QFileDialog, QSpinBox, QCheckBox,
     QProgressBar, QTableWidget, QTableWidgetItem, QTextEdit, QMessageBox,
     QGroupBox, QHeaderView, QDialog, QDialogButtonBox, QListWidget,
-    QListWidgetItem, QAbstractItemView,
+    QListWidgetItem, QAbstractItemView, QComboBox,
 )
 
 from pdf2image import convert_from_path
 import omr_correct as omr
+import email_utils as emu
 
 
 class AnalysisWorker(QThread):
@@ -30,7 +31,7 @@ class AnalysisWorker(QThread):
     failed = Signal(str)                 # human-readable error + traceback
 
     def __init__(self, exam_pdf, students_path, answers_path,
-                 num_questions, num_options, output_dir, dpi):
+                 num_questions, num_options, output_dir, dpi, exam_type=''):
         super().__init__()
         self.exam_pdf = exam_pdf
         self.students_path = students_path
@@ -39,6 +40,7 @@ class AnalysisWorker(QThread):
         self.num_options = num_options
         self.output_dir = output_dir
         self.dpi = dpi  # 0 = auto-detect
+        self.exam_type = exam_type
 
     def run(self):
         try:
@@ -117,7 +119,8 @@ class AnalysisWorker(QThread):
             omr.save_review_cache(all_results, students_df, correct_answers_by_perm,
                                    self.num_questions, self.num_options,
                                    excel_path, pdf_path, cache_path,
-                                   exam_pdf_path=self.exam_pdf, dpi=dpi)
+                                   exam_pdf_path=self.exam_pdf, dpi=dpi,
+                                   exam_type=self.exam_type)
 
             n_processed = sum(1 for r in all_results if r.get('answers'))
             n_matched = sum(1 for r in all_results if r.get('u_number'))
@@ -141,6 +144,7 @@ class AnalysisWorker(QThread):
                 # Needed by the review screen's "Rescan this page" action.
                 'exam_pdf': self.exam_pdf,
                 'dpi': dpi,
+                'exam_type': self.exam_type,
             })
         except Exception as e:
             self.failed.emit(f"{e}\n\n{traceback.format_exc()}")
@@ -393,6 +397,14 @@ class NewExamScreen(QWidget):
         dpi_layout.addWidget(self.dpi_spin)
         form.addRow("Source DPI:", dpi_row)
 
+        # Whole-run setting, not graded/detected from the scan -- just
+        # carried through into review_cache.pkl and substituted into
+        # review-PDF emails via {exam_type}. Also editable later from the
+        # Review screen if left blank here or set wrong.
+        self.exam_type_combo = QComboBox()
+        self.exam_type_combo.addItems([''] + emu.EXAM_TYPES)
+        form.addRow("Exam type:", self.exam_type_combo)
+
         group.setLayout(form)
         return group
 
@@ -460,6 +472,7 @@ class NewExamScreen(QWidget):
             pdf, students, answers,
             self.questions_spin.value(), self.options_spin.value(),
             output_dir, 0 if self.dpi_auto_check.isChecked() else self.dpi_spin.value(),
+            exam_type=self.exam_type_combo.currentText(),
         )
         self.worker.log.connect(self._on_log)
         self.worker.page_done.connect(self._on_page_done)

@@ -1,6 +1,6 @@
 # OMR Exam Corrector — User Manual
 
-**Version 1.4** · Albert Hernansanz ([albert.hernansanz@upf.edu](mailto:albert.hernansanz@upf.edu))
+**Version 1.5** · Albert Hernansanz ([albert.hernansanz@upf.edu](mailto:albert.hernansanz@upf.edu))
 
 ---
 
@@ -148,6 +148,7 @@ Use **Browse…** next to each field or type the path directly.
 | **Number of questions** | How many questions to grade (1–100). Must match your answer key. |
 | **Options per question** | Number of answer options per question (2–10, default 4). |
 | **Source DPI** | Leave **Auto-detect** checked unless auto-detection fails. |
+| **Exam type** (v1.5) | **Midterm**, **Final**, or **Retake** — not graded or detected from the scan, just carried through to the review screen and substituted into review-PDF emails via `{exam_type}` (see [section 10](#10-emailing-a-student-their-review-pdf)). Leave blank if not applicable; it can also be set or corrected later from the review screen. |
 
 ### 4.3 Run the analysis
 
@@ -230,7 +231,18 @@ The review screen has three panels:
 - **Right — Correct this page**: editable fields for identification data and
   an answer grid.
 
-### 6.1 Preview controls
+### 6.1 Searching for a student (v1.5)
+
+The search box above the Pages table filters rows by substring match
+against **name, surname, or U-number** — one free-text field covers all
+three, since e.g. typing a surname alone or a full "name surname" both
+just match somewhere inside "‹U-number› ‹full name›". Matching is
+case-insensitive and updates as you type; clearing the box shows every
+page again. Clicking a still-visible row jumps to that page exactly like
+clicking any row normally does (see above) — searching only changes which
+rows are shown, not how selecting one works.
+
+### 6.2 Preview controls
 
 | Control | Action |
 | --------- | -------- |
@@ -258,6 +270,20 @@ checks them):
 | **Group** | Student group code (the sheet's GRUP bubbles). |
 | **Partial** | Exam part number, if used (the sheet's PARCIAL bubbles). |
 | **Permutation** | Exam permutation — determines which answer key is applied (the sheet's PERMUT bubbles). |
+| **Exam type** (v1.5) | **Midterm** / **Final** / **Retake** — see [4.2](#42-set-exam-parameters). Whole-run, not per-page: changing it here applies for the rest of the session (and is saved immediately, not gated behind **Apply correction**). |
+
+Below the identification fields, an **Email** field (v1.5) shows the
+matched student's email address from the students list (only the
+`llistatGGiA` roster format provides one automatically — see
+[2.2](#22-students-list-csv-or-excel)). If the matched student has no
+email on file, the field is empty but still editable — type one in and
+either press Enter or click elsewhere to save it. It's remembered for
+that student for the rest of the session (and written into `results.xlsx`
+on the next save, adding the Email column if the students list didn't
+have one), so it only needs entering once even if you use
+[emailing](#10-emailing-a-student-their-review-pdf) again on a later
+page for the same student. If the U-Number isn't matched to any student,
+the field is disabled — there's no roster entry to attach an address to.
 
 ### 7.2 Answer grid
 
@@ -390,13 +416,14 @@ processing and have no scanned image to export.
 
 ## 10. Emailing a student their review PDF
 
-If the students list has an **Email** column (currently only the
-`llistatGGiA` roster format provides one — see
-[section 2.2](#22-students-list-csv-or-excel)), the **"Send by email..."**
-button next to "Export for student review request..." generates the same
-2-page review PDF and sends it straight to that student's address from
-your own Gmail account, with a preview step before anything actually goes
-out.
+The **"Send by email..."** button next to "Export for student review
+request..." generates the same 2-page review PDF and sends it straight to
+that student's address from your own Gmail account, with a preview step
+before anything actually goes out. The recipient address comes from the
+**Email** field described in [7.1](#71-identification-fields) — either
+pre-filled automatically (currently only the `llistatGGiA` roster format
+provides one — see [section 2.2](#22-students-list-csv-or-excel)) or
+entered by hand for a student who has none on file (v1.5).
 
 ### 10.1 One-time setup
 
@@ -425,17 +452,44 @@ cloud-synced folder like Google Drive).
 
 You can also customize the **subject and body templates** used to prefill
 every send. Available placeholders: `{nom}`, `{cognom1}`, `{cognom2}`,
-`{u_number}`, `{dni}`, `{grup}`, `{parcial}`, `{permutacio}` — each is
+`{u_number}`, `{dni}`, `{grup}`, `{parcial}`, `{permutacio}`, `{exam_type}`
+(v1.5 — Midterm/Final/Retake, see [4.2](#42-set-exam-parameters)) — each is
 substituted from the current page's data; an unrecognized placeholder is
-left as literal text rather than causing an error.
+left as literal text rather than causing an error. The default templates
+are in English and include the student's name, surname, U-Number, group,
+and exam type:
+
+> Subject: `{exam_type} exam review - {nom} {cognom1}`
+>
+> Dear {nom} {cognom1},
+>
+> Please find attached the review of your {exam_type} exam
+> (U-Number: U{u_number}, Group: {grup}).
+>
+> Best regards,
+
+**Editing the body template as a text file (v1.5)**: the body template
+also lives in its own plain `.txt` file
+(`email_body_template.txt` in the app's config folder — the same
+`%APPDATA%\OMRExamCorrector` folder the settings/App Password live in,
+never the project folder), so it can be edited directly in Notepad or any
+text editor instead of the dialog's text box. Click **"Open template
+file..."** in the settings dialog to open it, edit and save it there, then
+click **"Reload from file"** back in the dialog to pull those changes into
+the text box (or just close and reopen the dialog). Editing and saving
+from the text box works exactly as before too — both paths write the same
+file, so whichever was used most recently wins.
 
 ### 10.2 Sending
 
-Click **"Send by email..."** on any page with a matched student who has an
-email on file. A preview dialog opens with the recipient, subject, and body
-all pre-filled *and editable* — nothing is sent until you review it and
-click **Send**. If the student has no email on file, or the U-Number wasn't
-matched to a roster entry, you'll get an explanatory message instead.
+Click **"Send by email..."** on any page with a matched student. If there's
+no email on file yet, you'll be prompted to enter one in the Email field
+first (see [7.1](#71-identification-fields)) rather than being blocked
+outright. A preview dialog opens with the recipient, subject, and body all
+pre-filled *and editable* — nothing is sent until you review it and click
+**Send**. If the U-Number wasn't matched to a roster entry at all, you'll
+get an explanatory message instead, since there's no record to attach an
+address to.
 
 Each send is independent and manual — there's no "send to everyone" batch
 button. Sending runs in the background so the app stays responsive; the
@@ -647,12 +701,23 @@ Password still fails.
 
 ### "Send by email..." is greyed out, or shows "No email address on file"
 
-Same processing-failure guard as the export button above (see
-[4.4 Status codes](#44-status-codes)), plus: the matched student's row in
-the students list has no `Email` value (only the `llistatGGiA` roster
-format provides one — see [section 2.2](#22-students-list-csv-or-excel)),
-or the U-Number wasn't matched to any roster entry at all. Fix the
-U-Number field or add an Email column to the students list, then retry.
+Greyed out is the same processing-failure guard as the export button above
+(see [4.4 Status codes](#44-status-codes)) — nothing to do with email. "No
+email address on file" means the U-Number wasn't matched to any roster
+entry at all (fix the U-Number field first — there's no record to attach
+an address to); if the student *is* matched but the students list just
+has no `Email` value for them (only the `llistatGGiA` roster format
+provides one automatically — see [section 2.2](#22-students-list-csv-or-excel)),
+type an address directly into the **Email** field (v1.5, see
+[7.1](#71-identification-fields)) instead — no need to edit the students
+list file.
+
+### "Exam type" is blank after reopening an older session
+
+Sessions saved before v1.5 didn't record an exam type, so reopening one
+via `review_cache.pkl` shows the field blank rather than guessing — set it
+in the review screen ([7.1](#71-identification-fields)) and it's saved
+immediately, no need to re-run the analysis.
 
 ### First launch of the `.exe` is very slow
 
@@ -702,11 +767,11 @@ hand if the scan is wrong.
 
 | File | Screen | What to show | Status |
 | ------ | -------- | ----------- | ------ |
-| `01-start-screen.png` | Start | Full window at launch, both main buttons visible, footer showing **v1.4**. | ✅ current (no PII) |
-| `02-new-exam-form.png` | New exam | Form with all four file fields filled in, before clicking Run. | ✅ current (no PII) |
+| `01-start-screen.png` | Start | Full window at launch, both main buttons visible, footer showing the current version. | ⚠️ footer still reads v1.4, now stale (app is v1.5) — otherwise fine, no PII |
+| `02-new-exam-form.png` | New exam | Form with all four file fields filled in, before clicking Run — should also show the new **Exam type** field (v1.5) in Exam parameters. | ⬜ stale: predates the Exam type field |
 | `03-analysis-running.png` | New exam | Mid-run: progress bar partially filled, several rows in the table. | ✅ current (no PII) |
-| `04-review-screen.png` | Review | Full window with an annotated page loaded, overlay **off**, Score column visible. | ⚠️ shows real student PII — needs regenerating, see note above |
-| `05-correction-panel.png` | Review | Right panel close-up: fields in order (U-Number, DNI, Group, Partial, Permutation), answer grid visible. | ⬜ needs synthetic scan, see `todo_albert.md` |
+| `04-review-screen.png` | Review | Full window with an annotated page loaded, overlay **off**, Score column visible, and the new search box (v1.5) above the Pages table. | ⚠️ shows real student PII AND predates the search box — needs regenerating, see note above |
+| `05-correction-panel.png` | Review | Right panel close-up: fields in order (U-Number, DNI, Group, Partial, Permutation, Exam type), Email field, answer grid visible. | ⬜ needs synthetic scan, see `todo_albert.md` |
 | `06-expected-overlay.png` | Review | Same page as `04` but **"Show expected answers" toggled on** (blue slashes visible). | ⚠️ shows real student PII — needs regenerating, see note above |
 | `07-legend.png` | Review | Crop of the legend strip at the bottom of the preview panel. | ⬜ needs synthetic scan, see `todo_albert.md` |
 | `08-export-button.png` | Review | Right panel close-up showing the **"Export for student review request..."** button, plus the save dialog it opens with the suggested filename visible. | ⬜ needs synthetic scan, see `todo_albert.md` |

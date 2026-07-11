@@ -217,3 +217,180 @@ def test_busy_state_disables_navigation(review_screen, backing_files, sample_res
     review_screen._local_busy = False
     review_screen._refresh_action_buttons()
     assert review_screen.table.isEnabled()
+
+
+# ----- Search/filter box -----
+
+def _two_page_run_state(backing_files, sample_result, students_df):
+    r2 = dict(sample_result)
+    r2["page"] = 2
+    r2["u_number"] = "000002"
+    return make_run_state([sample_result, r2], backing_files, students_df=students_df,
+                           correct_answers_by_perm={"1": {1: {"A"}}}, num_questions=2, num_options=4)
+
+
+def test_search_filters_pages_table_by_name(review_screen, backing_files, sample_result, sample_students_df):
+    review_screen.load(_two_page_run_state(backing_files, sample_result, sample_students_df))
+    settle(review_screen)
+
+    review_screen.search_edit.setText("Bob")
+    assert review_screen.table.isRowHidden(0)      # Alice
+    assert not review_screen.table.isRowHidden(1)  # Bob
+
+
+def test_search_filters_pages_table_by_u_number(review_screen, backing_files, sample_result, sample_students_df):
+    review_screen.load(_two_page_run_state(backing_files, sample_result, sample_students_df))
+    settle(review_screen)
+
+    review_screen.search_edit.setText("000002")
+    assert review_screen.table.isRowHidden(0)
+    assert not review_screen.table.isRowHidden(1)
+
+
+def test_clearing_search_shows_all_rows_again(review_screen, backing_files, sample_result, sample_students_df):
+    review_screen.load(_two_page_run_state(backing_files, sample_result, sample_students_df))
+    settle(review_screen)
+
+    review_screen.search_edit.setText("Bob")
+    review_screen.search_edit.setText("")
+    assert not review_screen.table.isRowHidden(0)
+    assert not review_screen.table.isRowHidden(1)
+
+
+def test_search_box_resets_on_new_load(review_screen, backing_files, sample_result, sample_students_df):
+    rs = make_run_state([sample_result], backing_files, students_df=sample_students_df,
+                         correct_answers_by_perm={"1": {1: {"A"}}}, num_questions=2, num_options=4)
+    review_screen.load(rs)
+    settle(review_screen)
+    review_screen.search_edit.setText("Bob")
+
+    rs2 = make_run_state([sample_result], backing_files, students_df=sample_students_df,
+                          correct_answers_by_perm={"1": {1: {"A"}}}, num_questions=2, num_options=4)
+    review_screen.load(rs2)
+    settle(review_screen)
+    assert review_screen.search_edit.text() == ""
+
+
+# ----- Manual email entry/edit -----
+
+def test_email_field_prefilled_from_roster(review_screen, backing_files, sample_result):
+    students_df = pd.DataFrame({
+        "Nom": ["Alice"], "Cognom1": ["Example"], "Cognom2": ["Smith"],
+        "U_number": ["U000001"], "Email": ["alice@example.upf.edu"],
+    })
+    rs = make_run_state([sample_result], backing_files, students_df=students_df,
+                         correct_answers_by_perm={"1": {1: {"A"}}}, num_questions=2, num_options=4)
+    review_screen.load(rs)
+    settle(review_screen)
+    assert review_screen.edit_email.text() == "alice@example.upf.edu"
+    assert review_screen.edit_email.isEnabled()
+
+
+def test_email_field_editable_and_empty_when_no_email_on_file(
+        review_screen, backing_files, sample_result, sample_students_df):
+    """sample_students_df has no Email column -- a matched student with no
+    email on file must still get an editable (not disabled) field, per the
+    'enable adding one manually' requirement."""
+    rs = make_run_state([sample_result], backing_files, students_df=sample_students_df,
+                         correct_answers_by_perm={"1": {1: {"A"}}}, num_questions=2, num_options=4)
+    review_screen.load(rs)
+    settle(review_screen)
+    assert review_screen.edit_email.text() == ""
+    assert review_screen.edit_email.isEnabled()
+
+
+def test_email_field_disabled_when_no_matched_student(review_screen, backing_files, sample_result):
+    r = dict(sample_result)
+    r["u_number"] = "999999"  # not in the roster
+    rs = make_run_state([r], backing_files,
+                         students_df=pd.DataFrame(columns=["Nom", "Cognom1", "Cognom2", "U_number"]),
+                         correct_answers_by_perm={"1": {1: {"A"}}}, num_questions=2, num_options=4)
+    review_screen.load(rs)
+    settle(review_screen)
+    assert not review_screen.edit_email.isEnabled()
+
+
+def test_manually_entered_email_persists_to_students_df_and_lookup(
+        review_screen, backing_files, sample_result, sample_students_df, monkeypatch):
+    rs = make_run_state([sample_result], backing_files, students_df=sample_students_df,
+                         correct_answers_by_perm={"1": {1: {"A"}}}, num_questions=2, num_options=4)
+    review_screen.load(rs)
+    settle(review_screen)
+
+    monkeypatch.setattr(review_screen, "_save_async", lambda r: None)
+    review_screen.edit_email.setText("new@upf.edu")
+    review_screen._on_email_edited()
+
+    assert review_screen.student_lookup["000001"]["Email"] == "new@upf.edu"
+    row = review_screen.students_df[review_screen.students_df["U_number"] == "U000001"]
+    assert row.iloc[0]["Email"] == "new@upf.edu"
+
+
+def test_manually_entered_email_creates_email_column_if_missing(
+        review_screen, backing_files, sample_result, sample_students_df, monkeypatch):
+    """sample_students_df has no Email column at all -- adding one manually
+    must not crash even though the source DataFrame never had it."""
+    assert "Email" not in sample_students_df.columns
+    rs = make_run_state([sample_result], backing_files, students_df=sample_students_df,
+                         correct_answers_by_perm={"1": {1: {"A"}}}, num_questions=2, num_options=4)
+    review_screen.load(rs)
+    settle(review_screen)
+
+    monkeypatch.setattr(review_screen, "_save_async", lambda r: None)
+    review_screen.edit_email.setText("new@upf.edu")
+    review_screen._on_email_edited()
+
+    assert "Email" in review_screen.students_df.columns
+
+
+def test_on_email_edited_does_not_save_when_unchanged(review_screen, backing_files, sample_result, monkeypatch):
+    students_df = pd.DataFrame({
+        "Nom": ["Alice"], "Cognom1": ["Example"], "Cognom2": ["Smith"],
+        "U_number": ["U000001"], "Email": ["alice@example.upf.edu"],
+    })
+    rs = make_run_state([sample_result], backing_files, students_df=students_df,
+                         correct_answers_by_perm={"1": {1: {"A"}}}, num_questions=2, num_options=4)
+    review_screen.load(rs)
+    settle(review_screen)
+
+    calls = []
+    monkeypatch.setattr(review_screen, "_save_async", lambda r: calls.append(r))
+    review_screen.edit_email.setText("alice@example.upf.edu")  # unchanged
+    review_screen._on_email_edited()
+    assert calls == []
+
+
+# ----- Exam type -----
+
+def test_exam_type_loaded_from_run_state(review_screen, backing_files, sample_result, sample_students_df):
+    rs = make_run_state([sample_result], backing_files, students_df=sample_students_df,
+                         correct_answers_by_perm={"1": {1: {"A"}}}, num_questions=2, num_options=4)
+    rs["exam_type"] = "Final"
+    review_screen.load(rs)
+    settle(review_screen)
+    assert review_screen.exam_type == "Final"
+    assert review_screen.exam_type_combo.currentText() == "Final"
+
+
+def test_exam_type_defaults_to_empty_for_older_cache_without_it(
+        review_screen, backing_files, sample_result, sample_students_df):
+    rs = make_run_state([sample_result], backing_files, students_df=sample_students_df,
+                         correct_answers_by_perm={"1": {1: {"A"}}}, num_questions=2, num_options=4)
+    assert "exam_type" not in rs
+    review_screen.load(rs)  # must not raise KeyError
+    settle(review_screen)
+    assert review_screen.exam_type == ""
+
+
+def test_changing_exam_type_after_load_triggers_save(
+        review_screen, backing_files, sample_result, sample_students_df, monkeypatch):
+    rs = make_run_state([sample_result], backing_files, students_df=sample_students_df,
+                         correct_answers_by_perm={"1": {1: {"A"}}}, num_questions=2, num_options=4)
+    review_screen.load(rs)
+    settle(review_screen)
+
+    calls = []
+    monkeypatch.setattr(review_screen, "_save_async", lambda r: calls.append(r))
+    review_screen.exam_type_combo.setCurrentText("Final")
+    assert review_screen.exam_type == "Final"
+    assert len(calls) == 1

@@ -40,16 +40,18 @@ Run `python omr_gui.py` (or the packaged `.exe` — see below). Three screens:
 - **New exam** — pick the scanned PDF, student list, and answer key; runs
   the pipeline in the background with live per-page progress, then switches
   straight into review.
-- **Review** — step through pages, fix identification fields (U-Number, DNI,
-  Group, Partial, Permutation) and answer marks, zoom (`+`/`-`, `Ctrl`+scroll
-  wheel) and pan (middle-click drag) the annotated preview. Toggle **"Show
-  expected answers"** to overlay blue diagonal slashes on every bubble the
-  answer key marks correct — a visual aid for the reviewer that never
-  modifies the underlying scan. Every correction is saved automatically
-  (`results.xlsx` and `annotated_review.pdf` updated immediately) and a
-  `review_cache.pkl` lets the same session be reopened later. The "Apply
-  correction" button turns orange while a change hasn't fully reached disk
-  yet, and back to normal once it has.
+- **Review** — search for a student by name, surname, or U-number to jump
+  straight to their page, or step through pages one at a time; fix
+  identification fields (U-Number, DNI, Group, Partial, Permutation, Exam
+  type) and answer marks, zoom (`+`/`-`, `Ctrl`+scroll wheel) and pan
+  (middle-click drag) the annotated preview. Toggle **"Show expected
+  answers"** to overlay blue diagonal slashes on every bubble the answer
+  key marks correct — a visual aid for the reviewer that never modifies the
+  underlying scan. Every correction is saved automatically (`results.xlsx`
+  and `annotated_review.pdf` updated immediately) and a `review_cache.pkl`
+  lets the same session be reopened later. The "Apply correction" button
+  turns orange while a change hasn't fully reached disk yet, and back to
+  normal once it has.
 
 Manually-added/removed answer marks and manually-edited Group/Partial/
 Permutation values are highlighted in **purple** on the annotated PDF
@@ -62,8 +64,9 @@ with the expected-answers overlay and colour legend included) named after
 the student's identification fields — ready to hand over for a grade-review
 request. A **"Send by email..."** button next to it can email that same PDF
 straight to the student via your Gmail account (App Password auth, one send
-at a time with a preview before anything goes out) when the students list
-provides an email address.
+at a time with a preview before anything goes out), using the email address
+from the students list or one entered by hand directly in the review screen
+if the roster doesn't have one.
 
 See [MANUAL.md](MANUAL.md) for the full step-by-step user manual, and
 [INSTALL.md](INSTALL.md) for detailed setup, input file formats, the
@@ -85,10 +88,10 @@ PATH — see [INSTALL.md](INSTALL.md) for platform-specific instructions.
 ```bash
 pip install -r requirements-dev.txt
 pytest                        # everything, including a real OCR pass (~1 min)
-pytest -m "not integration"   # fast unit/GUI suite only (~7s, no real exam data needed)
+pytest -m "not integration"   # fast unit/GUI suite only (~14s, no real exam data needed)
 ```
 
-135 tests, organized around every bug class found in past review passes —
+156 tests, organized around every bug class found in past review passes —
 see [TEST_SUITE.md](TEST_SUITE.md) for the full design and latest results.
 
 ## Standalone Windows executable
@@ -137,6 +140,27 @@ Three things worth knowing when building or distributing it:
   matching backend module too, or "Email settings..." fails in the frozen
   build with "No recommended backend was available" despite working fine
   from source.
+
+## What's new in v1.5
+
+- **Manual email entry**: the review screen's new **Email** field shows the
+  matched student's address from the roster, but stays editable even when
+  there isn't one — type an address in by hand and it's remembered for
+  that student (and written into `results.xlsx`'s Email column, adding it
+  if the students list didn't have one) instead of blocking "Send by
+  email..." outright.
+- **Editable email body template as a plain text file**: the body template
+  now also lives in its own `.txt` file in the app's config folder, openable
+  and editable directly in any text editor via a new **"Open template
+  file..."** button in Email settings — not just the dialog's text box.
+- **English default email templates with exam type**: the default
+  subject/body are now in English and include the student's name, surname,
+  U-Number, and group, plus a new **Exam type** (Midterm/Final/Retake)
+  setting — picked once per run (or corrected later in the review screen)
+  and substituted into emails via `{exam_type}`.
+- **Search the Pages table**: a new search box in the review screen filters
+  by name, surname, or U-number and jumps to the matching page on click —
+  no more scrolling through a long roster to find one student.
 
 ## What's new in v1.4
 
@@ -215,7 +239,7 @@ gui/
   review_screen.py          page-by-page review/correction screen
   email_dialogs.py          email settings + send-preview dialogs
   main_window.py            wires the three screens together
-tests/                     pytest suite (135 tests) -- see TEST_SUITE.md
+tests/                     pytest suite (156 tests) -- see TEST_SUITE.md
   conftest.py                shared fixtures (synthetic data only)
   test_*.py                  one file per module/concern
 assets/

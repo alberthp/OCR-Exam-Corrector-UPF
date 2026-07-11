@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QMessageBox, QFileDialog,
     QGroupBox, QHeaderView, QSplitter, QScrollArea, QAbstractItemView,
-    QTableWidget, QTableWidgetItem, QApplication, QDialog,
+    QTableWidget, QTableWidgetItem, QApplication, QDialog, QComboBox,
 )
 
 from pdf2image import convert_from_path
@@ -71,7 +71,8 @@ class _SaveWorker(QThread):
     def __init__(self, all_results, students_df, correct_answers_by_perm,
                  num_questions, num_options, excel_path, pdf_path, result,
                  pdf_idx, cache_path, exam_pdf_path, dpi,
-                 synced_excel_path, synced_pdf_path, synced_cache_path):
+                 synced_excel_path, synced_pdf_path, synced_cache_path,
+                 exam_type=None):
         super().__init__()
         self.all_results = all_results
         self.students_df = students_df
@@ -88,6 +89,7 @@ class _SaveWorker(QThread):
         self.synced_excel_path = synced_excel_path
         self.synced_pdf_path = synced_pdf_path
         self.synced_cache_path = synced_cache_path
+        self.exam_type = exam_type
 
     def run(self):
         try:
@@ -102,7 +104,8 @@ class _SaveWorker(QThread):
                                        self.correct_answers_by_perm,
                                        self.num_questions, self.num_options,
                                        self.excel_path, self.pdf_path, self.cache_path,
-                                       exam_pdf_path=self.exam_pdf_path, dpi=self.dpi)
+                                       exam_pdf_path=self.exam_pdf_path, dpi=self.dpi,
+                                       exam_type=self.exam_type)
         except Exception as e:
             self.local_done.emit(str(e))
             self.synced.emit(str(e))
@@ -318,6 +321,10 @@ class ReviewScreen(QWidget):
         self.synced_cache_path = None
         self.exam_pdf_path = None
         self.source_dpi = None
+        # Whole-run setting (Midterm/Final/Retake), not a per-page field --
+        # set in the New exam screen or corrected here, substituted into
+        # emails via {exam_type}. See email_utils.EXAM_TYPES.
+        self.exam_type = ''
         self.student_lookup = {}
         self.pdf_page_index = {}
         self.current_index = 0
@@ -343,6 +350,10 @@ class ReviewScreen(QWidget):
         self._update_persist_indicator()
         self.exam_pdf_path = run_state.get('exam_pdf')
         self.source_dpi = run_state.get('dpi')
+        self.exam_type = run_state.get('exam_type') or ''
+        self.exam_type_combo.blockSignals(True)
+        self.exam_type_combo.setCurrentText(self.exam_type)
+        self.exam_type_combo.blockSignals(False)
         self._preview_cache = {}
         self._setup_local_scratch()
 
@@ -356,6 +367,10 @@ class ReviewScreen(QWidget):
         self._recompute_pdf_page_index()
 
         self.answers_table.setHorizontalHeaderLabels(omr.OPTION_LABELS[:self.num_options])
+
+        self.search_edit.blockSignals(True)
+        self.search_edit.clear()
+        self.search_edit.blockSignals(False)
 
         self.table.setRowCount(0)
         for r in self.all_results:
@@ -442,6 +457,12 @@ class ReviewScreen(QWidget):
     def _build_table_panel(self):
         group = QGroupBox("Pages")
         layout = QVBoxLayout(group)
+
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Search by name, surname, or U-number...")
+        self.search_edit.textChanged.connect(self._filter_table)
+        layout.addWidget(self.search_edit)
+
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
             ["Page", "Status", "U-Number", "Student", "DNI", "Perm", "Manual"])
@@ -452,6 +473,27 @@ class ReviewScreen(QWidget):
         self.table.itemSelectionChanged.connect(self._on_table_row_selected)
         layout.addWidget(self.table)
         return group
+
+    def _filter_table(self, text):
+        """Hides Pages-table rows that don't match the search box, by
+        substring against the U-Number and Student (name) columns --
+        covers "search by name", "surname", "name and surname", or
+        "U-number" all with one free-text field, since all of those are
+        just substrings of "<u_number> <full name>".
+
+        Doesn't touch self.current_index or page navigation -- Prev/Next
+        and clicking a still-visible row work exactly as before, this only
+        changes which rows are shown.
+        """
+        query = text.strip().lower()
+        for row in range(self.table.rowCount()):
+            if not query:
+                self.table.setRowHidden(row, False)
+                continue
+            u_item = self.table.item(row, 2)
+            name_item = self.table.item(row, 3)
+            haystack = f"{u_item.text() if u_item else ''} {name_item.text() if name_item else ''}".lower()
+            self.table.setRowHidden(row, query not in haystack)
 
     def _fill_table_row(self, row, r):
         u_clean = str(r.get('u_number', '') or '').split('|')[0]
@@ -597,11 +639,30 @@ class ReviewScreen(QWidget):
         form.addRow("Group:", self.edit_grup)
         form.addRow("Partial:", self.edit_parcial)
         form.addRow("Permutation:", self.edit_permut)
+
+        # Whole-run setting, not per-page -- see self.exam_type. Lives here
+        # (rather than only in the New exam screen) so it can also be set
+        # or corrected for a session reopened from an older cache file that
+        # predates this field.
+        self.exam_type_combo = QComboBox()
+        self.exam_type_combo.addItems([''] + emu.EXAM_TYPES)
+        self.exam_type_combo.currentTextChanged.connect(self._on_exam_type_changed)
+        form.addRow("Exam type:", self.exam_type_combo)
+
         layout.addLayout(form)
 
         self.matched_student_label = QLabel("Matched student: -")
         self.matched_student_label.setWordWrap(True)
         layout.addWidget(self.matched_student_label)
+
+        email_field_row = QHBoxLayout()
+        email_field_row.addWidget(QLabel("Email:"))
+        self.edit_email = QLineEdit()
+        self.edit_email.setPlaceholderText("no email on file -- enter manually")
+        self.edit_email.editingFinished.connect(self._on_email_edited)
+        email_field_row.addWidget(self.edit_email)
+        layout.addLayout(email_field_row)
+
         self.edit_u_number.textChanged.connect(self._update_matched_student_preview)
         for field in (self.edit_u_number, self.edit_dni, self.edit_parcial,
                       self.edit_permut, self.edit_grup):
@@ -1016,14 +1077,84 @@ class ReviewScreen(QWidget):
     def _update_matched_student_preview(self):
         u_clean = self.edit_u_number.text().strip().upper().replace('U', '')
         student = self.student_lookup.get(u_clean)
+        # A failed page (no scanned image) has every ID field disabled --
+        # the Email field should follow suit rather than staying editable
+        # for a page there's nothing to send.
+        page_editable = True
+        if self.all_results:
+            page_editable = self._current_result().get('_corrected') is not None
+        # Programmatic setText() below doesn't fire editingFinished (that
+        # only fires on Enter/focus-loss during actual user editing), so
+        # this doesn't risk re-triggering _on_email_edited -- but guard
+        # anyway since _load_edit_form() also calls this while _loading_form.
         if student is not None:
             name = (f"{student.get('Nom', '')} {student.get('Cognom1', '')} "
                      f"{student.get('Cognom2', '') or ''}").strip()
             self.matched_student_label.setText(f"Matched student: {name} (U{u_clean})")
+            self.edit_email.setText(str(student.get('Email', '') or ''))
+            self.edit_email.setEnabled(page_editable)
+            self.edit_email.setPlaceholderText("no email on file -- enter manually")
         elif u_clean:
             self.matched_student_label.setText("Matched student: (no match)")
+            self.edit_email.clear()
+            self.edit_email.setEnabled(False)
+            self.edit_email.setPlaceholderText("no matched student to attach an email to")
         else:
             self.matched_student_label.setText("Matched student: -")
+            self.edit_email.clear()
+            self.edit_email.setEnabled(False)
+            self.edit_email.setPlaceholderText("no matched student to attach an email to")
+
+    def _on_email_edited(self):
+        """editingFinished fires on Enter or focus-loss after a real user
+        edit -- persists the new address into students_df/student_lookup
+        (so write_excel's Email column and future sends pick it up) and
+        triggers a real save so it survives closing the app, the same way
+        any other correction on this page does.
+        """
+        if self._loading_form:
+            return
+        u_clean = self.edit_u_number.text().strip().upper().replace('U', '')
+        if not u_clean:
+            return
+        new_email = self.edit_email.text().strip()
+        student = self.student_lookup.get(u_clean)
+        current_email = str(student.get('Email', '') or '').strip() if student is not None else ''
+        if new_email == current_email:
+            return
+        self._save_student_email(u_clean, new_email)
+        r = self._current_result()
+        if r.get('_corrected') is not None:
+            self._save_async(r)
+        self.status_label.setText(f"Email saved for U{u_clean}.")
+
+    def _save_student_email(self, u_clean, email):
+        """Writes a manually-entered/edited email address back into
+        students_df (the source write_excel's Email column reads from) and
+        the cached student_lookup used elsewhere in this session -- so it's
+        remembered for every other page for the same student, not just the
+        one being edited right now.
+        """
+        if self.students_df is not None and 'U_number' in self.students_df.columns:
+            norm = (self.students_df['U_number'].astype(str).str.strip()
+                     .str.upper().str.replace('U', '', regex=False))
+            mask = norm == u_clean
+            if mask.any():
+                self.students_df.loc[mask, 'Email'] = email
+        student = self.student_lookup.get(u_clean)
+        if student is not None:
+            student['Email'] = email
+
+    def _on_exam_type_changed(self, text):
+        # Fires as soon as the combo gets its first item (during
+        # _build_edit_panel(), before load() has ever run) -- nothing to
+        # save yet at that point.
+        if not self.all_results or self.exam_type == text:
+            return
+        self.exam_type = text
+        r = self._current_result()
+        if r.get('_corrected') is not None:
+            self._save_async(r)
 
     # ----- Answer grid editing -----
 
@@ -1250,7 +1381,8 @@ class ReviewScreen(QWidget):
         worker = _SaveWorker(self.all_results, self.students_df, self.correct_answers_by_perm,
                               self.num_questions, self.num_options, self.excel_path, self.pdf_path,
                               r, pdf_idx, self.cache_path, self.exam_pdf_path, self.source_dpi,
-                              self.synced_excel_path, self.synced_pdf_path, self.synced_cache_path)
+                              self.synced_excel_path, self.synced_pdf_path, self.synced_cache_path,
+                              exam_type=self.exam_type)
         worker.local_done.connect(lambda err: self._on_local_save_done(err, page_index, pdf_idx))
         worker.synced.connect(lambda err, w=worker: self._on_synced(err, w))
         self._pending_sync_workers.append(worker)
@@ -1486,16 +1618,29 @@ class ReviewScreen(QWidget):
 
         u_clean = str(r.get('u_number', '') or '').split('|')[0]
         matched_student = self.student_lookup.get(u_clean)
-        to_email = str(matched_student.get('Email', '') or '').strip() if matched_student is not None else ''
+        # self.edit_email is the live, editable source of truth -- pre-filled
+        # from the roster when there's a match, but also where a manually
+        # entered address (no Email column, or no match at all) lives.
+        to_email = self.edit_email.text().strip()
         if not to_email:
-            QMessageBox.information(
-                self, "No email address on file",
-                "This student's record in the students list has no Email "
-                "address (only the 'llistatGGiA' roster format provides "
-                "one), or the U-Number wasn't matched to a student. Correct "
-                "the U-Number field or add an Email column to the students "
-                "list, then try again.")
+            if matched_student is None:
+                QMessageBox.information(
+                    self, "No email address on file",
+                    "The U-Number wasn't matched to a student in the "
+                    "students list, so there's no record to attach an "
+                    "email address to. Correct the U-Number field first.")
+            else:
+                QMessageBox.information(
+                    self, "No email address on file",
+                    "This student's record in the students list has no "
+                    "Email address on file. Enter one in the Email field "
+                    "above (it will be remembered for this student), then "
+                    "try again.")
+                self.edit_email.setFocus()
             return
+        if u_clean:
+            self._save_student_email(u_clean, to_email)
+            matched_student = self.student_lookup.get(u_clean)
 
         settings = emu.load_email_settings()
         app_password = emu.load_app_password(settings['address'])
@@ -1522,7 +1667,7 @@ class ReviewScreen(QWidget):
             QMessageBox.critical(self, "Could not export PDF", str(e))
             return
 
-        fields = emu.template_fields_for_page(r, matched_student)
+        fields = emu.template_fields_for_page(r, matched_student, exam_type=self.exam_type)
         subject = emu.fill_template(settings['subject_template'], fields)
         body = emu.fill_template(settings['body_template'], fields)
 

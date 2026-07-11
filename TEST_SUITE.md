@@ -7,16 +7,16 @@ This project had **zero automated tests** before this suite — every bug
 found and fixed in the two prior review passes ([`RELEASE_REVIEW_v1.4.md`](RELEASE_REVIEW_v1.4.md))
 was caught by disposable, ad-hoc scripts that were written once, verified,
 and deleted. This suite turns that one-off verification into a permanent
-regression net: **135 tests**, **100% passing**, run in **~50 seconds**
-(6 seconds without the real-data integration pass).
+regression net: **156 tests**, **100% passing**, run in **~61 seconds**
+(~14 seconds without the real-data integration pass).
 
 ## How to run it
 
 ```bash
 pip install -r requirements-dev.txt
 
-pytest                        # everything (~52s, needs the real exam files)
-pytest -m "not integration"   # fast unit/GUI suite only (~7s, no real data needed)
+pytest                        # everything (~61s, needs the real exam files)
+pytest -m "not integration"   # fast unit/GUI suite only (~14s, no real data needed)
 pytest -m integration         # just the real-data pass
 pytest -m "not slow"          # everything except the full OCR pipeline test
 ```
@@ -46,8 +46,8 @@ be tested:
 | Layer | Files | Tests | Needs a display? | Needs real data? |
 |---|---|---|---|---|
 | Pure logic | `test_decode_identifier.py`, `test_grup_and_perm_normalization.py`, `test_scoring_and_excel.py` | 50 | No | No |
-| File loading | `test_load_students.py`, `test_answer_key.py`, `test_email_utils.py` | 56 | No | No |
-| GUI state | `test_review_screen_gui.py`, `test_main_window_gui.py` | 14 | Offscreen Qt platform | No |
+| File loading | `test_load_students.py`, `test_answer_key.py`, `test_email_utils.py` | 64 | No | No |
+| GUI state | `test_review_screen_gui.py`, `test_main_window_gui.py` | 27 | Offscreen Qt platform | No |
 | Shipped examples | `test_examples.py` | 9 | No | No (synthetic `examples/` files) |
 | End-to-end | `test_integration_real_data.py` | 6 | No | Yes (skips if absent) |
 
@@ -60,6 +60,12 @@ that the actual files in `examples/` (the ones a new user opens first)
 still load the way `examples/README.md` claims, so a future change to
 `load_students()`/`load_correct_answers()` can't silently break the
 onboarding path without a test noticing.
+
+**v1.5 additions** followed the same file-loading/GUI-state split: the new
+body-template `.txt` file storage (migration from the old JSON-embedded
+template, round-tripping, `open_body_template_file()`) landed in
+`test_email_utils.py`; the new search box, manual email entry/persistence,
+and the `exam_type` whole-run setting landed in `test_review_screen_gui.py`.
 
 ### Every regression test traces to a specific, previously-real bug
 
@@ -113,22 +119,22 @@ every row is a real bug this suite would now catch if it came back.
 ## Results
 
 ```
-135 passed in 50.42s
+156 passed in 61.11s
 ```
 
 | Test file | Tests | Result | Notes |
 |---|---:|---|---|
 | `test_answer_key.py` | 18 | ✅ all pass | `load_correct_answers`, `validate_answer_key` (all 4 issue classes), `apply_answer_key_row_fix` |
 | `test_decode_identifier.py` | 11 | ✅ all pass | Every branch of the 6/7/8-digit U-number recovery logic |
-| `test_email_utils.py` | 22 | ✅ all pass | Template substitution, settings persistence, keyring credential storage |
+| `test_email_utils.py` | 30 | ✅ all pass | Template substitution (incl. `exam_type`), settings persistence, body-template `.txt` file storage/migration, keyring credential storage |
 | `test_examples.py` | 9 | ✅ all pass | The shipped `examples/` files load correctly and stay mutually consistent |
 | `test_grup_and_perm_normalization.py` | 23 | ✅ all pass | `decode_grup`, both `_normalize_*_value` helpers, `backfill_and_validate_groups` |
 | `test_load_students.py` | 16 | ✅ all pass | All 4 student-list formats + encoding/blank-cell/duplicate edge cases |
 | `test_main_window_gui.py` | 4 | ✅ all pass | `closeEvent` busy-state guard |
-| `test_review_screen_gui.py` | 10 | ✅ all pass | Navigation confirmation, busy-lock, grid boundaries, zero-page guard |
+| `test_review_screen_gui.py` | 23 | ✅ all pass | Navigation confirmation, busy-lock, grid boundaries, zero-page guard, search/filter, manual email entry, `exam_type` persistence |
 | `test_scoring_and_excel.py` | 16 | ✅ all pass | `score_question` boundaries, `write_excel` with empty/missing/orphan inputs |
 | `test_integration_real_data.py` | 6 | ✅ all pass | Real answer key, both real rosters, real PDF DPI detection, full OCR pipeline (11/11 pages, 45.9s) |
-| **Total** | **135** | **✅ 135/135** | 50.42s wall time |
+| **Total** | **156** | **✅ 156/156** | 61.11s wall time |
 
 One test failure surfaced during development — `test_full_fix_workflow_resolves_all_issues`
 initially used a synthetic answer-key fixture that didn't fully mirror the
@@ -147,12 +153,12 @@ real data files (`LSDS Retake Juliol2026 Questionnarie.pdf`,
 
 ---
 
-## Recommendation before shipping v1.4
+## Recommendation before shipping
 
 Run `pytest` (the full suite, including integration) once more immediately
 before packaging the `.exe` or tagging the release, and treat any failure
 as a release blocker. For day-to-day development, `pytest -m "not
-integration"` (~7s) is fast enough to run on every change; save the full
+integration"` (~14s) is fast enough to run on every change; save the full
 pass (with real OCR) for pre-release and after any change touching
 `process_page`, `detect_markers`, or the perspective-correction pipeline.
 
