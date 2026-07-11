@@ -19,3 +19,9 @@ xlrd>=2.0.1  # legacy .xls student-list support
 
 # Desktop GUI (omr_gui.py)
 PySide6>=6.5.0
+
+# Emailing a student their review PDF (gui/email_dialogs.py). Stores the
+# Gmail App Password in the OS credential store (Windows Credential
+# Manager / macOS Keychain / Linux Secret Service) -- never in a plaintext
+# file, since this project folder can live inside a cloud-synced directory.
+keyring>=24.0.0

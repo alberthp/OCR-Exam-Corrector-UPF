@@ -110,10 +110,21 @@ def detect_id_boxes(img_bgr):
         if bbox_area == 0: continue
         fr = area / bbox_area
         
-        # Lower fill threshold (was 0.85) to accept boxes that contain no marks
-        # but are still valid (empty CENTRE, ASSIGNATURA, etc. on Ricoh scans)
-        if (550 < ch < 700 and 100 < cw < 480 
-            and y < h * 0.5 and fr > 0.25):
+        # Fill ratio (was 0.85, then 0.25) has kept getting lowered because it
+        # measures how much of the box's printed content (border + bubble
+        # outlines) the red-pixel mask picked up -- and that varies a lot
+        # scan-to-scan (compression, focus, lighting) independent of whether
+        # the box is genuinely there. Real data confirmed this: on a batch
+        # where every page had exactly 7 candidate contours in this size
+        # class (i.e. the geometry filter alone was already 100% precise,
+        # zero spurious extras to reject), ASSIGNATURA still measured as low
+        # as 0.232-0.234 on two pages -- just under the old 0.25 cutoff --
+        # silently dropping it from validation and the annotated PDF outline.
+        # CENTRE was measured as low as 0.301 in the same batch, one bad scan
+        # from the same failure. 0.10 stays comfortably below every genuine
+        # box observed while the size/position filters do the real work.
+        if (550 < ch < 700 and 100 < cw < 480
+            and y < h * 0.5 and fr > 0.10):
             candidates.append({'x': x, 'y': y, 'w': cw, 'h': ch})
     
     # Remove inner duplicates (smaller boxes inside larger ones)
@@ -766,12 +777,27 @@ def decode_identifier(digits):
         return ''.join(str(d) for _, d in non_null), 'OK'
     
     if len(non_null) == 7:
+        # Which of the 8 bubble positions is the one that didn't register.
+        # This -- not merely "the boundary digit happens to be 0" -- is
+        # what actually tells leading/trailing-pad apart from a missed
+        # REAL digit that happens to sit next to a genuine pad zero. The
+        # previous check (`non_null[-1][1] == 0`) could fire even when the
+        # missing bubble was one of the 6 real digits and a genuine pad
+        # zero elsewhere just happened to be last in the list, silently
+        # returning a wrong-but-plausible 6-digit ID tagged OK_PADDED
+        # (confirmed: digits=[2,3,4,None,6,7,0,0] -> old code returned
+        # "234670", dropping the missing digit instead of the pad zero).
+        missing_idx = next(i for i, d in enumerate(digits) if d is None)
         s = ''.join(str(d) for _, d in non_null)
-        if non_null[0][1] == 0:
+        if missing_idx == 0 and digits[1] == 0:
             return s[1:], 'OK_PADDED'
-        if non_null[-1][1] == 0:
+        if missing_idx == 7 and digits[6] == 0:
             return s[:6], 'OK_PADDED'
-        return s[:6], 'WARNING'
+        # The missing bubble is one of the 6 real digits (or the pad
+        # position that DID register isn't actually 0) -- the dropped
+        # digit can't be recovered, so surface the raw 7-digit read
+        # instead of confidently guessing a specific wrong 6-digit ID.
+        return s, 'WARNING'
     
     if len(non_null) < 6:
         return ''.join(str(d) for _, d in non_null), 'INCOMPLETE'
@@ -1193,9 +1219,11 @@ def _write_results_sheet(ws, results_list, student_lookup, correct_answers,
     """Populate one worksheet with a results table for a single permutation.
 
     Column layout (left to right):
-      Cols 1-16  (fixed): Page, Status, U_Number, U_Status, Name, Surname1,
-                          Surname2, DNI, PARCIAL, PERMUT, GRUP, N_Answered,
-                          Grade, Grade_10, ID_Problem, Manual_Edit
+      Cols 1-18 (fixed, see `fixed_headers` below -- kept as the single
+      source of truth so this comment can't drift out of sync with the code
+      again): Page, Status, U_Number, U_Status, Name, Surname1, Surname2,
+      Email, DNI, PARCIAL, PERMUT, GRUP, GRUP_Check, N_Answered, Grade,
+      Grade_10, ID_Problem, Manual_Edit
       Then for each question Q (repeated num_questions times):
         (num_options) option columns  -- 1 if student marked that option, else 0
         1 Score column                -- partial-credit score for this question
@@ -1217,8 +1245,8 @@ def _write_results_sheet(ws, results_list, student_lookup, correct_answers,
     border = Border(*[Side(style='thin')]*4)
     
     fixed_headers = ['Page', 'Status', 'U_Number', 'U_Status',
-                     'Name', 'Surname1', 'Surname2',
-                     'DNI', 'PARCIAL', 'PERMUT', 'GRUP',
+                     'Name', 'Surname1', 'Surname2', 'Email',
+                     'DNI', 'PARCIAL', 'PERMUT', 'GRUP', 'GRUP_Check',
                      'N_Answered', 'Grade', 'Grade_10', 'ID_Problem', 'Manual_Edit']
     n_fixed = len(fixed_headers)
     OPTS_USED = OPTION_LABELS[:num_options]
@@ -1312,7 +1340,7 @@ def _write_results_sheet(ws, results_list, student_lookup, correct_answers,
         u_status = r.get('u_status', '')
         
         # Match student
-        nom, c1, c2 = '', '', ''
+        nom, c1, c2, email = '', '', '', ''
         id_problem = 'OK'
         matched_student = None
         if u_clean in student_lookup:
@@ -1320,6 +1348,7 @@ def _write_results_sheet(ws, results_list, student_lookup, correct_answers,
             nom = matched_student.get('Nom', '')
             c1 = matched_student.get('Cognom1', '')
             c2 = matched_student.get('Cognom2', '') or ''
+            email = matched_student.get('Email', '') or ''
         elif u_clean:
             id_problem = 'UNUMBER_NO_MATCH'
         else:
@@ -1339,16 +1368,29 @@ def _write_results_sheet(ws, results_list, student_lookup, correct_answers,
         ws.cell(row=ri, column=5, value=nom)
         ws.cell(row=ri, column=6, value=c1)
         ws.cell(row=ri, column=7, value=c2)
-        ws.cell(row=ri, column=8, value=r.get('dni', ''))
-        ws.cell(row=ri, column=9, value=r.get('parcial', ''))
+        ws.cell(row=ri, column=8, value=email)
+        ws.cell(row=ri, column=9, value=r.get('dni', ''))
+        ws.cell(row=ri, column=10, value=r.get('parcial', ''))
         permut_val = r.get('permut')
-        ws.cell(row=ri, column=10, value='' if permut_val is None else str(permut_val))
-        ws.cell(row=ri, column=11, value=r.get('grup', ''))
+        ws.cell(row=ri, column=11, value='' if permut_val is None else str(permut_val))
+
+        # GRUP: may have been backfilled/cross-checked against the student
+        # roster's theory group by backfill_and_validate_groups() -- see
+        # 'grup_check' ('OK' / 'FROM_ROSTER' / 'MISMATCH (...)' / '').
+        grup_cell = ws.cell(row=ri, column=12, value=r.get('grup', ''))
+        grup_check = r.get('grup_check', '')
+        if grup_check == 'OK':
+            grup_cell.fill = ok_fill
+        elif grup_check == 'FROM_ROSTER':
+            grup_cell.fill = warn_fill
+        elif grup_check.startswith('MISMATCH'):
+            grup_cell.fill = err_fill
+        ws.cell(row=ri, column=13, value=grup_check)
 
         # Compute grades
         answers = r.get('answers', {})
         n_answered = sum(1 for a in answers.values() if a.get('marks'))
-        ws.cell(row=ri, column=12, value=n_answered)
+        ws.cell(row=ri, column=14, value=n_answered)
         
         total_score = 0.0
         max_score = 0.0
@@ -1375,17 +1417,17 @@ def _write_results_sheet(ws, results_list, student_lookup, correct_answers,
             else:
                 q_score = None
         
-        ws.cell(row=ri, column=13, value=round(total_score, 3))
+        ws.cell(row=ri, column=15, value=round(total_score, 3))
         grade_10 = round((total_score / max_score) * 10, 2) if max_score > 0 else 0
-        ws.cell(row=ri, column=14, value=grade_10)
+        ws.cell(row=ri, column=16, value=grade_10)
 
-        cell_id = ws.cell(row=ri, column=15, value=id_problem)
+        cell_id = ws.cell(row=ri, column=17, value=id_problem)
         if id_problem == 'OK':
             cell_id.fill = ok_fill
         else:
             cell_id.fill = err_fill
 
-        cell_manual = ws.cell(row=ri, column=16, value='Y' if r.get('_manual_edit') else 'N')
+        cell_manual = ws.cell(row=ri, column=18, value='Y' if r.get('_manual_edit') else 'N')
         if r.get('_manual_edit'):
             cell_manual.fill = warn_fill
 
@@ -1433,11 +1475,19 @@ def _write_results_sheet(ws, results_list, student_lookup, correct_answers,
         for ci in range(1, n_fixed + 1):
             ws.cell(row=ri, column=ci).border = border
     
-    # Column widths
-    widths = {'A':6,'B':10,'C':10,'D':12,'E':14,'F':14,'G':14,'H':12,'I':8,
-              'J':8,'K':8,'L':8,'M':8,'N':8,'O':18,'P':10}
-    for col, w in widths.items():
-        ws.column_dimensions[col].width = w
+    # Column widths (indexed to fixed_headers' order, not hardcoded letters,
+    # so inserting/removing a fixed column doesn't silently misalign widths)
+    widths_by_header = {
+        'Page': 6, 'Status': 10, 'U_Number': 10, 'U_Status': 12,
+        'Name': 14, 'Surname1': 14, 'Surname2': 14, 'Email': 26, 'DNI': 12,
+        'PARCIAL': 8, 'PERMUT': 8, 'GRUP': 8, 'GRUP_Check': 20,
+        'N_Answered': 8, 'Grade': 8, 'Grade_10': 8, 'ID_Problem': 18,
+        'Manual_Edit': 10,
+    }
+    for ci, h in enumerate(fixed_headers, 1):
+        w = widths_by_header.get(h)
+        if w:
+            ws.column_dimensions[openpyxl.utils.get_column_letter(ci)].width = w
     
     # Narrow columns for option markers (1/0) and slightly wider for scores
     for q in range(1, num_questions + 1):
@@ -1448,7 +1498,160 @@ def _write_results_sheet(ws, results_list, student_lookup, correct_answers,
         score_col_letter = openpyxl.utils.get_column_letter(q_col_start + num_options)
         ws.column_dimensions[score_col_letter].width = 7
     
-    ws.freeze_panes = 'Q4'
+    ws.freeze_panes = f"{openpyxl.utils.get_column_letter(n_fixed + 1)}4"
+
+
+def _normalize_group_value(value):
+    """'01' and '1' both mean theory group 1. The GRUP bubble field has two
+    digit columns (padded, e.g. "01"/"02"), while a roster-derived
+    TheoryGroup is a bare single digit ("1"/"2") -- comparing them as raw
+    strings made every genuinely-matching page register as a false
+    MISMATCH. Strips the leading zero via int() when the value parses as
+    one; falls back to the stripped string for anything else.
+    """
+    s = str(value).strip()
+    try:
+        return str(int(s))
+    except (TypeError, ValueError):
+        return s
+
+
+def _normalize_perm_value(value):
+    """Perm labels are small integers, but pandas silently upcasts the
+    *entire* Perm column to float64 if even one cell elsewhere in it is
+    blank/NaN -- str(0.0) is "0.0", not "0". The scanned PERMUT bubble
+    always produces a clean Python int (str(0) == "0"), so a plain str()
+    cast on a float-upcast answer-key column can never match it again: every
+    page for that permutation silently routes to the No_Perm_Detected sheet
+    and grades against an empty key, with no error anywhere. Routes through
+    float() first (unlike _normalize_group_value) specifically to collapse
+    that "0.0" case back to "0"; falls back to the stripped string for
+    non-numeric Perm labels (e.g. "A"/"B").
+    """
+    s = str(value).strip()
+    try:
+        return str(int(float(s)))
+    except (TypeError, ValueError):
+        return s
+
+
+def backfill_and_validate_groups(all_results, students_df):
+    """Cross-check each page's scanned GRUP (theory group) against the
+    student roster, and backfill it when the bubble couldn't be read.
+
+    The exam bubble sheet has a single GRUP field; UPF's Moodle "participants"
+    roster export additionally encodes a theory group + seminar subgroup
+    (e.g. Grups="201-7"), from which load_students() derives a 'TheoryGroup'
+    column (the leading digit -- there's no bubble field for the seminar
+    subgroup, so that part is dropped). If students_df has no such column
+    (older/simpler roster formats), this is a no-op.
+
+    For each result matched to a roster student by U-number:
+      - scanned GRUP blank, roster has a theory group -> backfill r['grup']
+        from the roster; r['grup_source'] = 'roster', r['grup_check'] =
+        'FROM_ROSTER' (both output paths use this to mark it as
+        roster-derived rather than scanned, per the "indicate the origin"
+        requirement).
+      - scanned GRUP matches roster                    -> r['grup_check'] = 'OK'
+      - scanned GRUP conflicts with roster              -> r['grup_check'] =
+        'MISMATCH (scan=X, roster=Y)'. NOT auto-corrected: a misread bubble
+        and a stale/wrong roster entry are both plausible, so this is left
+        for a human to resolve rather than silently overwritten either way.
+      - no roster theory group, or student unmatched     -> r['grup_check'] = ''
+
+    Mutates each result dict in place. Returns None.
+    """
+    if students_df is None or 'TheoryGroup' not in students_df.columns:
+        return
+
+    roster = {}
+    for _, row in students_df.iterrows():
+        u = str(row.get('U_number', '')).strip().upper().replace('U', '')
+        tg = row.get('TheoryGroup')
+        if u and tg and str(tg) not in ('', 'nan', 'None'):
+            roster[u] = str(tg).strip()
+
+    for r in all_results:
+        u_clean = str(r.get('u_number', '') or '').split('|')[0]
+        roster_grup = roster.get(u_clean)
+        r['grup_source'] = 'scan'
+        if not roster_grup:
+            r['grup_check'] = ''
+            continue
+        scanned_grup = r.get('grup')
+        if scanned_grup in (None, ''):
+            r['grup'] = roster_grup
+            r['grup_source'] = 'roster'
+            r['grup_check'] = 'FROM_ROSTER'
+        elif _normalize_group_value(scanned_grup) == _normalize_group_value(roster_grup):
+            r['grup_check'] = 'OK'
+        else:
+            r['grup_check'] = f'MISMATCH (scan={scanned_grup}, roster={roster_grup})'
+
+
+def _write_group_sheet(ws, all_results, correct_answers_by_perm, group_value,
+                        num_questions, num_options):
+    """Populate a flat DNI/U_Number/Score roster for one theory group (T1/T2).
+
+    Unlike the per-permutation sheets, this cuts across PERMUT: a theory
+    group's students may have sat either exam permutation, so each row is
+    graded against whichever permutation that specific page detected,
+    using the same total_score/max_score/grade_10 formula as
+    _write_results_sheet() (so a student's number here always matches their
+    Grade_10 on their "Perm N" sheet).
+
+    Matches on the (possibly roster-backfilled) GRUP field via
+    _normalize_group_value(), so a scanned "01" and a roster "1" are treated
+    as the same group -- see backfill_and_validate_groups().
+
+    A page with no GRUP at all (unread and no roster to backfill from) is
+    excluded from every group sheet rather than guessed into one.
+    """
+    hdr_font = Font(bold=True, color='FFFFFF', name='Arial', size=10)
+    hdr_fill = PatternFill('solid', fgColor='2C3E50')
+    border = Border(*[Side(style='thin')]*4)
+
+    headers = ['DNI', 'U_Number', 'Score']
+    for ci, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=ci, value=h)
+        cell.font = hdr_font
+        cell.fill = hdr_fill
+        cell.alignment = Alignment(horizontal='center')
+        cell.border = border
+
+    ri = 2
+    for r in all_results:
+        grup_val = r.get('grup')
+        if grup_val in (None, '') or _normalize_group_value(grup_val) != group_value:
+            continue
+
+        permut_val = r.get('permut')
+        correct_by_q = (correct_answers_by_perm.get(str(permut_val))
+                         if permut_val is not None else None)
+        answers = r.get('answers', {})
+        total_score = 0.0
+        max_score = 0.0
+        if correct_by_q:
+            for q in range(1, num_questions + 1):
+                correct_set = correct_by_q.get(q, set())
+                if not correct_set:
+                    continue
+                student_marks = answers.get(q, {}).get('marks', set())
+                total_score += score_question(student_marks, correct_set, num_options)
+                max_score += 1.0
+        grade_10 = round((total_score / max_score) * 10, 2) if max_score > 0 else ''
+
+        ws.cell(row=ri, column=1, value=r.get('dni', ''))
+        ws.cell(row=ri, column=2, value=str(r.get('u_number') or '').split('|')[0])
+        ws.cell(row=ri, column=3, value=grade_10)
+        for ci in range(1, 4):
+            ws.cell(row=ri, column=ci).border = border
+        ri += 1
+
+    ws.column_dimensions['A'].width = 14
+    ws.column_dimensions['B'].width = 12
+    ws.column_dimensions['C'].width = 10
+    ws.freeze_panes = 'A2'
 
 
 def write_excel(all_results, students_df, correct_answers_by_perm, output_path,
@@ -1460,6 +1663,10 @@ def write_excel(all_results, students_df, correct_answers_by_perm, output_path,
                                   is graded against that permutation's answer key
       "No_Perm_Detected"      -- pages where the PERMUT bubble was unreadable;
                                   answer columns shown but Score left blank
+      "T1", "T2"              -- flat DNI/U_Number/Score roster per theory
+                                  group (see _write_group_sheet()), cutting
+                                  across PERMUT since GRUP and PERMUT are
+                                  independent fields
       "Summary"               -- totals: pages, U-matches, per-permutation counts
 
     Each scanned page is routed to the sheet matching its OWN detected PERMUT
@@ -1495,7 +1702,7 @@ def write_excel(all_results, students_df, correct_answers_by_perm, output_path,
     no_perm_group = []
     for r in all_results:
         permut_val = r.get('permut')
-        permut_str = str(permut_val) if permut_val is not None else None
+        permut_str = _normalize_perm_value(permut_val) if permut_val is not None else None
         if permut_str is not None and permut_str in groups:
             groups[permut_str].append(r)
         else:
@@ -1509,6 +1716,16 @@ def write_excel(all_results, students_df, correct_answers_by_perm, output_path,
     ws_noperm = wb.create_sheet("No_Perm_Detected")
     _write_results_sheet(ws_noperm, no_perm_group, student_lookup, {},
                           num_questions, num_options)
+
+    # ===== Theory-group roster sheets (T1/T2) =====
+    # Flat DNI/U-Number/Score view per theory group, independent of exam
+    # permutation -- GRUP (backfill_and_validate_groups() may have filled or
+    # cross-checked it against the roster) is orthogonal to PERMUT, so a T1
+    # student can appear on either the "Perm 1" or "Perm 2" sheet above.
+    for group_value in ('1', '2'):
+        ws_t = wb.create_sheet(f"T{group_value}")
+        _write_group_sheet(ws_t, all_results, correct_answers_by_perm,
+                            group_value, num_questions, num_options)
 
     # ===== Summary sheet =====
     ws2 = wb.create_sheet("Summary")
@@ -1672,6 +1889,7 @@ def _draw_annotated_page(c, r, student_lookup, page_w_pt, page_h_pt,
     BLUE = Color(0, 0.47, 0.86)
     ORANGE = Color(1, 0.39, 0)
     PURPLE = Color(0.58, 0.0, 0.83)  # marks/fields a reviewer added or changed by hand
+    TEAL = Color(0, 0.55, 0.55)  # GRUP value backfilled from the roster, not scanned
     GRAY_DARK = Color(0.15, 0.15, 0.15)
     GRAY = Color(0.4, 0.4, 0.4)
     GRAY_LIGHT = Color(0.94, 0.94, 0.94)
@@ -2038,10 +2256,22 @@ def _draw_annotated_page(c, r, student_lookup, page_w_pt, page_h_pt,
             return False
         return str(pre_edit.get(field) or '') != str(r.get(field) or '')
 
+    def _overlay_color(field):
+        # PURPLE takes priority: a reviewer's manual correction is the most
+        # authoritative value regardless of how GRUP was originally derived.
+        if _is_manually_edited(field):
+            return PURPLE
+        if field == 'grup':
+            if str(r.get('grup_check', '')).startswith('MISMATCH'):
+                return RED  # scanned GRUP disagrees with the roster -- needs a human look
+            if r.get('grup_source') == 'roster':
+                return TEAL  # bubble unreadable; backfilled from the roster
+        return GREEN
+
     value_overlays = {
-        'PARCIAL': (r.get('parcial', '') or '', _is_manually_edited('parcial')),
-        'PERMUT': ('' if permut_raw is None else str(permut_raw), _is_manually_edited('permut')),
-        'GRUP': (r.get('grup', '') or '', _is_manually_edited('grup')),
+        'PARCIAL': (r.get('parcial', '') or '', _overlay_color('parcial')),
+        'PERMUT': ('' if permut_raw is None else str(permut_raw), _overlay_color('permut')),
+        'GRUP': (r.get('grup', '') or '', _overlay_color('grup')),
     }
     
     for name, box in boxes.items():
@@ -2061,9 +2291,8 @@ def _draw_annotated_page(c, r, student_lookup, page_w_pt, page_h_pt,
         
         # Value overlay for PARCIAL/PERMUT/GRUP
         if name in value_overlays:
-            value, is_manual = value_overlays[name]
+            value, pill_color = value_overlays[name]
             if value and value != '' and value != 'None':
-                pill_color = PURPLE if is_manual else GREEN
                 # Pill above the box
                 val_str = str(value)
                 pill_font_size = 8.5  # ~20% bigger than the previous 7pt
@@ -2335,6 +2564,269 @@ def load_review_cache(cache_path):
     }
 
 
+def _read_answer_key_dataframe(answers_path):
+    """Load the raw Perm/QuestionNum/option-columns table from CSV or Excel.
+
+    Shared by load_correct_answers() and validate_answer_key() so validation
+    always sees exactly the rows the scoring pipeline will use -- including
+    the same row order, which the mislabeled-Perm heuristic in
+    validate_answer_key() depends on.
+    """
+    if answers_path.lower().endswith('.csv'):
+        df = pd.read_csv(answers_path)
+    else:
+        df = pd.read_excel(answers_path)
+
+    df.columns = [str(c).strip() for c in df.columns]
+
+    if 'Perm' not in df.columns or 'QuestionNum' not in df.columns:
+        raise ValueError(
+            "Answers file must have 'Perm' and 'QuestionNum' columns "
+            "(one row per question per permutation, with option columns "
+            "A, B, C, ... holding 1/0). Found columns: " + ', '.join(df.columns)
+        )
+    return df
+
+
+def validate_answer_key(answers_path, expected_num_questions=None, expected_num_options=None):
+    """Check an answer-key file for data-entry mistakes that would otherwise
+    silently corrupt grading.
+
+    load_correct_answers() and the scoring code are both permissive by
+    design: a (Perm, QuestionNum) pair that's missing is just skipped (no
+    error, the question is excluded from that permutation's max score) and a
+    duplicate pair silently lets the last row win. That's convenient for
+    normal use but means a copy/paste slip in the source spreadsheet -- e.g.
+    a row's Perm value bumped one row too early -- produces wrong or
+    incomplete grades with zero indication anything is wrong.
+
+    This function re-parses the same file and flags four problem classes:
+      - BLANK_PERM:   a row's Perm cell is blank/NaN. Flagged on its own
+                      rather than left to become the literal string "nan"
+                      and silently masquerade as a real permutation (see
+                      the blank-Perm handling below for what that caused).
+      - DUPLICATE:    the same (Perm, QuestionNum) pair appears more than once.
+      - MISSING:      a permutation is missing a QuestionNum that every other
+                      permutation in the file has (permutations are assumed to
+                      all cover the same question numbers).
+      - MISSING_OPTION: the file has fewer option columns (A, B, C, ...) than
+                      expected_num_options says the exam actually has. This
+                      one is easy to hit and silently devastating: option
+                      columns are read straight from whatever's in the file
+                      (load_correct_answers() has no idea how many options
+                      the exam is *supposed* to have), so a stale/wrong
+                      template -- e.g. a 4-option CSV reused for a 6-option
+                      exam -- costs every student credit for a genuinely
+                      correct E or F mark with zero warning: that option is
+                      just never in any question's correct set, so marking
+                      it scores as if it were wrong. Confirmed by testing.
+
+    For missing questions, it also looks for a plausible cause: a row
+    elsewhere whose Perm changed but whose QuestionNum kept incrementing
+    instead of resetting to 1 (the signature of a Perm value copy/pasted one
+    row too early in a file ordered by Perm-then-QuestionNum). When found,
+    the issue's 'suggested_fix' names the exact row and the Perm value it
+    was probably meant to have.
+
+    Args:
+        answers_path: path to the CSV/Excel answers file
+        expected_num_questions: if given, the question set every permutation
+            is checked against is 1..expected_num_questions instead of the
+            union of QuestionNum values actually seen in the file (catches a
+            permutation that's missing its last question(s) entirely, which
+            a union-only check would miss)
+        expected_num_options: if given, checks that option columns A, B, C...
+            up to this many exist in the file (catches a stale/wrong-sized
+            template, e.g. a 4-option file used for a 6-option exam)
+
+    Returns:
+        list of issue dicts, each with:
+            'severity'      -- always 'error' (every class here silently
+                                corrupts grading; there is no lesser rank yet)
+            'perm'          -- affected permutation key (str), or None for a
+                                file-wide issue (e.g. MISSING_OPTION)
+            'question'      -- affected question number (int), or None
+            'message'       -- human-readable description
+            'rows'          -- list of 1-based file row numbers involved
+                                (header is row 1)
+            'suggested_fix' -- None, or a dict:
+                {'row': int, 'new_perm': str, 'description': str}
+    """
+    df = _read_answer_key_dataframe(answers_path)
+    df = df.copy()
+
+    issues = []
+
+    # --- MISSING_OPTION: fewer option columns than the exam is configured
+    # for. A file-wide check (not per-permutation), done before anything
+    # else since it doesn't depend on Perm/QuestionNum at all.
+    if expected_num_options:
+        option_cols = {c for c in df.columns if c not in ('Perm', 'QuestionNum')}
+        expected_letters = OPTION_LABELS[:expected_num_options]
+        missing_letters = [l for l in expected_letters if l not in option_cols]
+        if missing_letters:
+            issues.append({
+                'severity': 'error',
+                'perm': None,
+                'question': None,
+                'message': (
+                    f"The answer key only has columns for options "
+                    f"{', '.join(sorted(option_cols & set(expected_letters))) or '(none)'}, "
+                    f"but this exam is configured for {expected_num_options} "
+                    f"options ({', '.join(expected_letters)}). Missing: "
+                    f"{', '.join(missing_letters)} -- a student marking one "
+                    f"of those bubbles will be silently scored as if it were "
+                    f"always wrong, since it can never appear in any "
+                    f"question's correct-answer set."
+                ),
+                'rows': [],
+                'suggested_fix': None,
+            })
+
+    # --- Blank Perm: flag distinctly and drop from every check below,
+    # rather than letting _normalize_perm_value() turn a blank/NaN cell
+    # into the literal string "nan" and have it flow through as if it
+    # were a real permutation. Confirmed by testing: left unflagged, this
+    # produces a confusing "Perm nan is missing Question N" message from
+    # the missing-question check below, AND a spurious "Perm nan" sheet in
+    # the Excel output (write_excel creates one sheet per key in the
+    # loaded answers dict).
+    blank_perm_mask = df['Perm'].isna() | (df['Perm'].astype(str).str.strip() == '')
+    for idx in df.index[blank_perm_mask]:
+        q = df.loc[idx, 'QuestionNum']
+        q_display = int(q) if pd.notna(pd.to_numeric(q, errors='coerce')) else str(q)
+        issues.append({
+            'severity': 'error',
+            'perm': None,
+            'question': None,
+            'message': (f"Row {idx + 2} has a blank Perm value (QuestionNum "
+                        f"{q_display}) -- every row must belong to a "
+                        f"permutation. Fix or delete this row."),
+            'rows': [idx + 2],
+            'suggested_fix': None,
+        })
+    df = df[~blank_perm_mask].copy()
+
+    df['Perm'] = df['Perm'].apply(_normalize_perm_value)
+    df['QuestionNum'] = pd.to_numeric(df['QuestionNum'], errors='coerce')
+
+    # --- Duplicates: same (Perm, QuestionNum) appears more than once ---
+    dup_mask = df.duplicated(subset=['Perm', 'QuestionNum'], keep=False) & df['QuestionNum'].notna()
+    for (perm, q), group in df[dup_mask].groupby(['Perm', 'QuestionNum']):
+        rows = [int(idx) + 2 for idx in group.index]
+        issues.append({
+            'severity': 'error',
+            'perm': perm,
+            'question': int(q),
+            'message': (f"Perm {perm}, Question {int(q)} appears {len(rows)} times "
+                        f"(rows {', '.join(map(str, rows))}). Only the last one is used "
+                        f"for scoring -- the rest are silently discarded."),
+            'rows': rows,
+            'suggested_fix': None,
+        })
+
+    # --- Heuristic: a row whose Perm differs from the previous row but whose
+    # QuestionNum keeps incrementing (instead of resetting to 1, as it
+    # normally would at the start of a new permutation's block) looks like a
+    # Perm value that was copy/pasted one row too early. ---
+    mislabel_suspects = {}  # (perm, q) -> (suggested_perm, row_number)
+    prev_perm, prev_q = None, None
+    for idx, row in df.iterrows():
+        perm, q = row['Perm'], row['QuestionNum']
+        if (prev_perm is not None and perm != prev_perm
+                and pd.notna(q) and pd.notna(prev_q) and q == prev_q + 1):
+            mislabel_suspects[(perm, q)] = (prev_perm, idx + 2)
+        prev_perm, prev_q = perm, q
+
+    # --- Missing questions: every permutation should cover the same set of
+    # question numbers. ---
+    if expected_num_questions:
+        expected_qnums = list(range(1, expected_num_questions + 1))
+    else:
+        expected_qnums = sorted(int(q) for q in df['QuestionNum'].dropna().unique())
+
+    for perm, group in df.groupby('Perm'):
+        have = set(group['QuestionNum'].dropna().astype(int))
+        for q in expected_qnums:
+            if q in have:
+                continue
+            suggested_fix = None
+            for (s_perm, s_q), (suggested_perm, row_no) in mislabel_suspects.items():
+                if int(s_q) == q and suggested_perm == perm:
+                    suggested_fix = {
+                        'row': row_no,
+                        'new_perm': suggested_perm,
+                        'description': (
+                            f"Row {row_no} is labeled Perm={s_perm}, QuestionNum={q}, "
+                            f"but it appears immediately after Perm {suggested_perm}'s "
+                            f"Question {q - 1} -- it looks like it should be "
+                            f"Perm={suggested_perm} instead."
+                        ),
+                    }
+                    break
+            issues.append({
+                'severity': 'error',
+                'perm': perm,
+                'question': q,
+                'message': (f"Perm {perm} is missing Question {q}. It will be silently "
+                            f"skipped when scoring this permutation (no error -- just a "
+                            f"smaller max possible grade for every student on this Perm)."),
+                'rows': [],
+                'suggested_fix': suggested_fix,
+            })
+
+    # 'question' is None for a blank-Perm issue (there's no question it's
+    # scoped to); sort those last within their group instead of comparing
+    # None to an int, which raises TypeError as soon as two such issues
+    # tie on str(perm) (confirmed: 2+ blank-Perm rows crashed this sort).
+    issues.sort(key=lambda i: (str(i['perm']), i['question'] if i['question'] is not None else -1))
+    return issues
+
+
+def apply_answer_key_row_fix(answers_path, row_number, new_perm):
+    """Apply a single suggested_fix from validate_answer_key(): relabel one
+    row's Perm value in place.
+
+    A backup of the original file is written alongside it (same path with a
+    '.bak' suffix, overwritten on repeated calls) before any modification,
+    since this edits the user's original input file.
+
+    Args:
+        answers_path: path to the CSV/Excel answers file
+        row_number: 1-based file row to edit (header is row 1), as returned
+            in a suggested_fix dict
+        new_perm: the Perm value to write into that row
+    """
+    import shutil
+    backup_path = answers_path + '.bak'
+    shutil.copy2(answers_path, backup_path)
+
+    df = _read_answer_key_dataframe(answers_path)
+    data_idx = row_number - 2
+    if data_idx < 0 or data_idx >= len(df):
+        raise ValueError(f"Row {row_number} is out of range for {answers_path}")
+
+    perm_col = 'Perm' if 'Perm' in df.columns else [c for c in df.columns if c.strip() == 'Perm'][0]
+    # The Perm column is often read as int64 (e.g. bare "1"/"2" values); a
+    # plain string assignment into an int64 column raises in modern pandas.
+    # Match the existing dtype when the new value parses cleanly as an int,
+    # otherwise widen the column to object so non-numeric Perm labels work.
+    if pd.api.types.is_integer_dtype(df[perm_col].dtype):
+        try:
+            new_val = int(new_perm)
+        except (TypeError, ValueError):
+            df[perm_col] = df[perm_col].astype(object)
+            new_val = new_perm
+    else:
+        new_val = new_perm
+    df.loc[data_idx, perm_col] = new_val
+
+    if answers_path.lower().endswith('.csv'):
+        df.to_csv(answers_path, index=False)
+    else:
+        df.to_excel(answers_path, index=False)
+
+
 def load_correct_answers(answers_path):
     """Load correct answers for all exam permutations from an Excel/CSV file.
 
@@ -2352,28 +2844,26 @@ def load_correct_answers(answers_path):
     column value.  The permutation key is stored as a string so it matches the
     PERMUT bubble readout (also string) in write_excel's routing step.
 
+    Silently tolerates the missing/duplicate-question data errors that
+    validate_answer_key() flags (a missing question is just absent from the
+    returned dict; a duplicate keeps the last row) -- callers that care
+    should run validate_answer_key() first and surface issues to the user.
+    A blank Perm cell is also tolerated the same way: the row is skipped
+    rather than becoming a bogus permutation labeled "nan" (which would
+    otherwise show up as a spurious extra sheet in write_excel's output).
+
     Returns:
         dict mapping perm_key (str) -> {question_num (int): set_of_correct_letters}
     """
-    if answers_path.lower().endswith('.csv'):
-        df = pd.read_csv(answers_path)
-    else:
-        df = pd.read_excel(answers_path)
-
-    df.columns = [str(c).strip() for c in df.columns]
-
-    if 'Perm' not in df.columns or 'QuestionNum' not in df.columns:
-        raise ValueError(
-            "Answers file must have 'Perm' and 'QuestionNum' columns "
-            "(one row per question per permutation, with option columns "
-            "A, B, C, ... holding 1/0). Found columns: " + ', '.join(df.columns)
-        )
+    df = _read_answer_key_dataframe(answers_path)
 
     option_cols = [c for c in df.columns if c not in ('Perm', 'QuestionNum')]
 
     correct_by_perm = {}
     for _, row in df.iterrows():
-        perm = str(row['Perm']).strip()
+        if pd.isna(row['Perm']) or str(row['Perm']).strip() == '':
+            continue
+        perm = _normalize_perm_value(row['Perm'])
         q = int(row['QuestionNum'])
         correct_set = set()
         for opt_col in option_cols:
@@ -2391,7 +2881,7 @@ def load_correct_answers(answers_path):
 def load_students(students_path):
     """Load and normalize a student list from Excel or CSV.
 
-    Two main supported formats:
+    Four supported formats:
 
     Format 1 -- UPF official .xls export (semicolon-separated or Excel):
         Row 1: course name (single cell, not a column header)
@@ -2404,15 +2894,53 @@ def load_students(students_path):
         Nom | Cognom1 | Cognom2 | U_number
         Column name matching is accent- and case-insensitive.
 
+    Format 3 -- Moodle "participants" export (e.g. courseid_NNNNN_participants.csv):
+        Nom | Cognoms | "Número ID" | Grups
+        Cognoms merges both surnames into one field (split on the first
+        space: everything before is Cognom1, everything after is Cognom2 --
+        imperfect for 3+-word compound surnames, but there's no reliable way
+        to split those without a name database, and it only affects display).
+        "Número ID" holds the U-number, typically lowercase-prefixed
+        ("u123456"); the 'U' is stripped downstream like any other format.
+        Grups encodes theory group + seminar subgroup as "<g><nn>-<s>" (e.g.
+        "201-7"): the theory group is always the single leading digit (1 or
+        2 in every export seen so far), so it's parsed out into a
+        'TheoryGroup' column. There's no field for the seminar subgroup on
+        the exam bubble sheet, so that part is discarded. TheoryGroup is
+        used by backfill_and_validate_groups() to cross-check/backfill the
+        scanned GRUP field.
+
+    Format 4 -- UPF official .xls export with EMAIL/PRACTICA (e.g.
+    "llistatGGiA (N).xls"): same two-row layout as Format 1
+    (course title, then IDUSUARI;NIA;COGNOM1;COGNOM2;NOM;EMAIL;PRACTICA), plus:
+        EMAIL     -- kept as-is in an 'Email' column (not used for grading,
+                     but handy for emailing a student their scanned exam)
+        PRACTICA  -- a 3-digit code (e.g. "102"); its leading digit is the
+                     theory group, parsed into 'TheoryGroup' the same way as
+                     Format 3's "Grups" column
+
     The function auto-detects whether the first data row is actually a header
     (UPF format) by checking if any of the recognized column names appear in
     that row.  CSV separator (comma vs semicolon) and encoding (UTF-8, Latin-1,
     cp1252) are also sniffed automatically.
 
     Returns:
-        DataFrame with columns: Nom, Cognom1, Cognom2, U_number
+        DataFrame with columns: Nom, Cognom1, Cognom2, U_number, plus Email
+        if the source had one, and TheoryGroup if the source had a
+        Grups/Grup/Practica column with parseable data.
         Rows with empty/null U_number are dropped.
     """
+    # Normalize column names: lowercase + strip accents. Defined before the
+    # CSV-reading block (not just before its later main use) because the
+    # headerless fallback below needs it to find the real header row.
+    def normalize_col(c):
+        s = str(c).strip().lower()
+        # Remove accents
+        for a, b in [('à','a'),('á','a'),('è','e'),('é','e'),('í','i'),
+                     ('ó','o'),('ò','o'),('ú','u'),('ü','u'),('ñ','n'),('ç','c')]:
+            s = s.replace(a, b).replace(a.upper(), b.upper())
+        return s
+
     # Pick correct reader based on extension
     ext = students_path.lower().split('.')[-1]
     if ext == 'csv':
@@ -2454,6 +2982,52 @@ def load_students(students_path):
                     break
             except Exception as e:
                 last_err = e
+
+        if df is None:
+            # A genuine "UPF official export" CSV (course-title-only line 1,
+            # real headers on line 2 -- this function's own docstring
+            # documents that variant as supported) can have ZERO separators
+            # on that first line, so every attempt above -- which lets
+            # pandas infer columns from line 1 -- sees exactly 1 column no
+            # matter which separator is tried, and shape[1] >= 2 never
+            # passes even when the separator guess was correct. Confirmed
+            # by testing: this made that documented format unconditionally
+            # fail to load.
+            #
+            # header=None does NOT fix this the way it might seem to:
+            # pandas' C parser still infers the expected field count from
+            # line 1 even with no declared header, and raises ParserError
+            # on every subsequent (wider) line instead of padding -- also
+            # confirmed by testing. So instead, read the raw lines directly
+            # to find which one actually looks like the header, then have
+            # pandas re-read starting from exactly that line via `skiprows`
+            # -- this sidesteps the ragged-row problem entirely, since
+            # pandas never sees the mismatched title line at all.
+            for opts in attempts:
+                try:
+                    with open(students_path, 'r', encoding=opts['encoding'], errors='replace') as f:
+                        raw_lines = [line for _, line in zip(range(5), f)]
+                except Exception as e:
+                    last_err = e
+                    continue
+                header_line_idx = None
+                for i, line in enumerate(raw_lines):
+                    fields = [normalize_col(v) for v in line.rstrip('\r\n').split(opts['sep'])]
+                    if any(c in fields for c in ['idusuari', 'cognom1', 'nom']):
+                        header_line_idx = i
+                        break
+                if header_line_idx is None:
+                    continue
+                try:
+                    df_try = pd.read_csv(students_path, skiprows=header_line_idx, **opts)
+                except Exception as e:
+                    last_err = e
+                    continue
+                if df_try.shape[1] < 2:
+                    continue
+                df = df_try
+                break
+
         if df is None:
             raise RuntimeError(f"Could not read CSV with any standard format. Last error: {last_err}")
     elif ext == 'xls':
@@ -2466,16 +3040,7 @@ def load_students(students_path):
             )
     else:  # xlsx, xlsm
         df = pd.read_excel(students_path)
-    
-    # Normalize column names: lowercase + strip accents
-    def normalize_col(c):
-        s = str(c).strip().lower()
-        # Remove accents
-        for a, b in [('à','a'),('á','a'),('è','e'),('é','e'),('í','i'),
-                     ('ó','o'),('ò','o'),('ú','u'),('ü','u'),('ñ','n'),('ç','c')]:
-            s = s.replace(a, b).replace(a.upper(), b.upper())
-        return s
-    
+
     # Detect if first row is a course title (single-cell header that spans columns)
     # The UPF export has the course code in row 0, real headers in row 1
     cols_normalized = [normalize_col(c) for c in df.columns]
@@ -2501,11 +3066,33 @@ def load_students(students_path):
             col_mapping[orig] = 'Cognom1'
         elif norm in ('cognom2', 'cognom 2', 'segon cognom', 'apellido2', 'apellido 2'):
             col_mapping[orig] = 'Cognom2'
-        elif norm in ('u_number', 'unumber', 'u-number', 'idusuari', 'id_usuari'):
+        elif norm in ('u_number', 'unumber', 'u-number', 'idusuari', 'id_usuari',
+                      'numero id', 'numeroid'):
             col_mapping[orig] = 'U_number'
-    
+        elif norm == 'cognoms':
+            col_mapping[orig] = 'Cognoms'
+        elif norm in ('grups', 'grup', 'practica'):
+            # Both UPF's "Grups" ("201-7") and "PRACTICA" ("102") formats
+            # encode the theory group as their leading digit; the rest
+            # (seminar subgroup / lab practice number) isn't used here.
+            col_mapping[orig] = 'GrupRaw'
+        elif norm in ('email', 'e-mail', 'correu', 'correu electronic', 'correu-e'):
+            col_mapping[orig] = 'Email'
+
     df = df.rename(columns=col_mapping)
-    
+
+    # Format 3: single merged "Cognoms" column -> split into Cognom1/Cognom2
+    if 'Cognoms' in df.columns and 'Cognom1' not in df.columns:
+        parts = df['Cognoms'].astype(str).str.strip().str.split(n=1, expand=True)
+        df['Cognom1'] = parts[0]
+        df['Cognom2'] = parts[1] if parts.shape[1] > 1 else ''
+        df['Cognom2'] = df['Cognom2'].fillna('')
+
+    # Format 3/4: "Grups"/"PRACTICA" -> theory group is the leading digit
+    if 'GrupRaw' in df.columns:
+        leading_digit = df['GrupRaw'].astype(str).str.strip().str[:1]
+        df['TheoryGroup'] = leading_digit.where(leading_digit.isin(['1', '2']))
+
     # Ensure all required columns exist
     for required in ['Nom', 'Cognom1', 'Cognom2', 'U_number']:
         if required not in df.columns:
@@ -2516,10 +3103,24 @@ def load_students(students_path):
                     f"Required column '{required}' not found in students file. "
                     f"Found columns: {list(df.columns)}"
                 )
-    
-    # Keep only the columns we care about (drop NIA, NIP, etc.)
-    df = df[['Nom', 'Cognom1', 'Cognom2', 'U_number']].copy()
-    
+
+    # Keep only the columns we care about (drop NIA, NIP, Grups, etc.)
+    keep_cols = ['Nom', 'Cognom1', 'Cognom2', 'U_number']
+    if 'Email' in df.columns:
+        keep_cols.append('Email')
+    if 'TheoryGroup' in df.columns:
+        keep_cols.append('TheoryGroup')
+    df = df[keep_cols].copy()
+
+    # A present-but-empty cell reads back as NaN, not '' -- left as-is it
+    # renders as the literal text "nan" wherever the value is interpolated
+    # into a display string (Excel, annotated PDF, email templates).
+    # Cognom2 (no second surname) is the common case, but testing showed
+    # Nom/Cognom1/Email are equally affected by any blank source cell.
+    for col in ('Nom', 'Cognom1', 'Cognom2', 'Email'):
+        if col in df.columns:
+            df[col] = df[col].fillna('')
+
     # Clean: drop rows where U_number is empty/nan
     df['U_number'] = df['U_number'].astype(str).str.strip()
     df = df[df['U_number'].notna() & (df['U_number'] != '') & 
@@ -2629,7 +3230,11 @@ automatically.
                             'Use --dpi 300 or --dpi 600 to force.')
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Verbose output')
-    
+    parser.add_argument('--ignore-answer-key-warnings', action='store_true',
+                       help='Proceed even if the answers file has missing/duplicate '
+                            'QuestionNum rows for a permutation (grading would silently '
+                            'be wrong or incomplete for that permutation).')
+
     args = parser.parse_args()
     
     # Validate num_options
@@ -2657,6 +3262,21 @@ automatically.
     print(f"  {len(students_df)} students loaded")
     
     print(f"Loading correct answers from {args.answers}...")
+    issues = validate_answer_key(args.answers, expected_num_questions=args.questions,
+                                  expected_num_options=args.num_options)
+    if issues:
+        print(f"\n  WARNING: {len(issues)} problem(s) found in the answers file:")
+        for issue in issues:
+            print(f"    - {issue['message']}")
+            if issue['suggested_fix']:
+                print(f"      Suggested fix: {issue['suggested_fix']['description']}")
+        if not args.ignore_answer_key_warnings:
+            print("\n  Refusing to proceed with a possibly-wrong answer key.")
+            print("  Fix the file above, or re-run with --ignore-answer-key-warnings "
+                  "to proceed anyway.")
+            sys.exit(1)
+        print("  --ignore-answer-key-warnings set: proceeding anyway.\n")
+
     correct_answers_by_perm = load_correct_answers(args.answers)
     perm_names = ', '.join(sorted(correct_answers_by_perm.keys()))
     print(f"  {len(correct_answers_by_perm)} permutation(s) loaded: {perm_names}")
@@ -2683,14 +3303,22 @@ automatically.
             u = r.get('u_number', '?')
             dni = r.get('dni', '?')
             n_ans = sum(1 for a in r.get('answers', {}).values() if a.get('marks'))
-            status = '✓' if r.get('status') == 'OK' else '✗'
-            print(f"  {status} P{i+1:3d}: DNI={dni:>10s} U={str(u):>10s} answers={n_ans}")
+            # ASCII, not a unicode checkmark: Windows consoles commonly default
+            # to a cp1252-family codepage that can't encode U+2713/U+2717,
+            # which crashed the whole run mid-batch the first time this
+            # printed a failed page.
+            status = 'OK' if r.get('status') == 'OK' else 'FAIL'
+            print(f"  [{status}] P{i+1:3d}: DNI={dni:>10s} U={str(u):>10s} answers={n_ans}")
         except Exception as e:
-            print(f"  ✗ P{i+1:3d}: ERROR - {e}")
+            print(f"  [FAIL] P{i+1:3d}: ERROR - {e}")
             if args.verbose:
                 traceback.print_exc()
             all_results.append({'page': i+1, 'status': 'EXCEPTION', 'error': str(e)})
     
+    # Cross-check/backfill GRUP against the roster's theory group, if the
+    # students file had one (e.g. a Moodle participants export's Grups column)
+    backfill_and_validate_groups(all_results, students_df)
+
     # Generate outputs
     excel_path = os.path.join(args.output_dir, 'results.xlsx')
     print(f"\nWriting Excel to {excel_path}...")

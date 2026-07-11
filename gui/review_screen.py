@@ -12,12 +12,14 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QMessageBox, QFileDialog,
     QGroupBox, QHeaderView, QSplitter, QScrollArea, QAbstractItemView,
-    QTableWidget, QTableWidgetItem, QApplication,
+    QTableWidget, QTableWidgetItem, QApplication, QDialog,
 )
 
 from pdf2image import convert_from_path
 from reportlab.lib.pagesizes import A4
 import omr_correct as omr
+import email_utils as emu
+from gui.email_dialogs import EmailSettingsDialog, EmailPreviewDialog
 
 
 def _copy_with_retry(src, dst, attempts=5, base_delay=1.0):
@@ -238,6 +240,19 @@ class ReviewScreen(QWidget):
     MANUAL_UNSAVED_COLOR = QColor(255, 165, 0)
     MANUAL_PERSISTED_COLOR = QColor(148, 0, 212)
 
+    # Background tint marking which option the answer key considers correct,
+    # in the answers grid itself (distinct from the preview panel's blue
+    # slash overlay, which shows the same information on the scanned image).
+    # Dark grey background for "answer key says this option is correct"
+    # cells, paired with a forced white foreground below (see
+    # _load_answers_grid) rather than relying on the theme's default text
+    # colour -- two rounds of "still too light / text unreadable" feedback
+    # on lighter greys (224, then 130) showed that guessing a grey which
+    # happens to contrast with an unknown theme's default text colour isn't
+    # reliable; forcing the foreground makes it contrast by construction.
+    EXPECTED_ANSWER_BG = QColor(60, 60, 60)
+    EXPECTED_ANSWER_FG = QColor(255, 255, 255)
+
     PREVIEW_DPI = 200  # rendered once per page; zoom rescales this cached pixmap
     ZOOM_MIN = 0.25
     ZOOM_MAX = 4.0
@@ -349,7 +364,21 @@ class ReviewScreen(QWidget):
             self._fill_table_row(row, r)
 
         self.current_index = 0
-        self._load_page(0)
+        if self.all_results:
+            self._load_page(0)
+        else:
+            # An exam PDF with zero pages (empty/corrupt file, or every
+            # page failed before even producing a result entry) leaves
+            # all_results empty -- _load_page(0) would otherwise crash with
+            # IndexError right after a run "successfully" completes.
+            self.page_label.setText("Page 0 / 0")
+            self.prev_btn.setEnabled(False)
+            self.next_btn.setEnabled(False)
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText(
+                "No pages to review -- the exam PDF had no pages, or none "
+                "were processed.")
+            self.status_label.setText("")
 
     def _setup_local_scratch(self):
         """Copy the synced excel/pdf/cache files into a local temp folder and
@@ -578,11 +607,17 @@ class ReviewScreen(QWidget):
                       self.edit_permut, self.edit_grup):
             field.textChanged.connect(self._mark_dirty)
 
-        layout.addWidget(QLabel("Answers (click a letter to toggle mark):"))
-        self.answers_table = QTableWidget(0, 10)
+        layout.addWidget(QLabel("Answers (click a letter to toggle mark; grey = expected correct option):"))
+        self.answers_table = QTableWidget(0, 11)
         self.answers_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.answers_table.cellClicked.connect(self._toggle_answer_cell)
         layout.addWidget(self.answers_table, stretch=1)
+
+        self.total_score_label = QLabel("Total score: -")
+        bold_font = self.total_score_label.font()
+        bold_font.setBold(True)
+        self.total_score_label.setFont(bold_font)
+        layout.addWidget(self.total_score_label)
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
@@ -605,6 +640,15 @@ class ReviewScreen(QWidget):
         self.export_review_btn = QPushButton("Export for student review request...")
         self.export_review_btn.clicked.connect(self._export_student_review_pdf)
         layout.addWidget(self.export_review_btn)
+
+        email_row = QHBoxLayout()
+        self.email_btn = QPushButton("Send by email...")
+        self.email_btn.clicked.connect(self._send_review_email)
+        self.email_settings_btn = QPushButton("Email settings...")
+        self.email_settings_btn.clicked.connect(self._open_email_settings)
+        email_row.addWidget(self.email_btn, stretch=1)
+        email_row.addWidget(self.email_settings_btn)
+        layout.addLayout(email_row)
         return group
 
     # ----- Page loading -----
@@ -868,28 +912,106 @@ class ReviewScreen(QWidget):
             font.setBold(False)
         item.setFont(font)
 
+    def _correct_answers_for_page(self, r):
+        """The {question_num: {correct_options}} dict for this page's
+        permutation, or {} if the permutation is unknown/has no key --
+        mirrors _compute_expected_overlay()'s lookup so the grid's grey
+        shading and the preview panel's blue slash overlay always agree.
+        """
+        permut_val = r.get('permut')
+        if permut_val is None:
+            return {}
+        return self.correct_answers_by_perm.get(str(permut_val)) or {}
+
+    def _grid_marks_for_row(self, row):
+        """Options currently shown as marked in one answers-grid row,
+        read directly from the grid rather than from `r` -- so a toggle is
+        reflected in the score preview immediately, even before "Apply
+        correction" commits it to the result dict.
+        """
+        opts = omr.OPTION_LABELS[:self.num_options]
+        marks = set()
+        for oi, opt in enumerate(opts):
+            item = self.answers_table.item(row, oi)
+            if item is not None and item.text() == opt:
+                marks.add(opt)
+        return marks
+
+    def _set_score_cell(self, row, marks, correct_set):
+        """Write the per-question partial-credit score (score_question(),
+        already clamped to >= 0) into the grid's trailing Score column.
+        Blank when the answer key has no entry for this question, matching
+        the blank Score cell write_excel() leaves in the same situation.
+        """
+        score_col = self.num_options
+        text = ''
+        if correct_set:
+            score = omr.score_question(marks, correct_set, self.num_options)
+            text = f"{score:.2f}"
+        item = QTableWidgetItem(text)
+        item.setTextAlignment(Qt.AlignCenter)
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        self.answers_table.setItem(row, score_col, item)
+
+    def _update_total_score_label(self):
+        """Recompute the footer total from the grid's current (possibly
+        unsaved) marks, using the same total_score/max_score/grade_10
+        formula as write_excel()'s per-permutation sheet, so the number
+        shown here always matches what Apply + Excel would produce.
+        """
+        r = self._current_result()
+        correct_by_q = self._correct_answers_for_page(r)
+        total = 0.0
+        max_score = 0.0
+        for qi, q in enumerate(range(1, self.num_questions + 1)):
+            correct_set = correct_by_q.get(q, set())
+            if not correct_set:
+                continue
+            marks = self._grid_marks_for_row(qi)
+            total += omr.score_question(marks, correct_set, self.num_options)
+            max_score += 1.0
+        if max_score > 0:
+            grade_10 = total / max_score * 10
+            self.total_score_label.setText(
+                f"Total score: {total:.2f} / {max_score:.0f}   ({grade_10:.2f} / 10)")
+        else:
+            self.total_score_label.setText("Total score: - (no answer key for this permutation)")
+
     def _load_answers_grid(self, r):
         # A fresh page load discards any in-progress (not-yet-applied) toggle
         # highlighting left over from whatever page was showing before.
         self._session_toggled_cells = set()
 
         answers = r.get('answers', {})
-        self.answers_table.setColumnCount(self.num_options)
-        self.answers_table.setHorizontalHeaderLabels(omr.OPTION_LABELS[:self.num_options])
+        correct_by_q = self._correct_answers_for_page(r)
+        opts = omr.OPTION_LABELS[:self.num_options]
+        self.answers_table.setColumnCount(self.num_options + 1)
+        self.answers_table.setHorizontalHeaderLabels(opts + ['Score'])
         self.answers_table.setRowCount(self.num_questions)
         self.answers_table.setVerticalHeaderLabels(
             [f"Q{q}" for q in range(1, self.num_questions + 1)])
-        opts = omr.OPTION_LABELS[:self.num_options]
         for qi, q in enumerate(range(1, self.num_questions + 1)):
             adata = answers.get(q, {})
             marks = adata.get('marks', set())
             auto_marks = self._auto_detected_marks(adata)
+            correct_set = correct_by_q.get(q, set())
             for oi, opt in enumerate(opts):
                 marked = opt in marks
                 item = QTableWidgetItem(opt if marked else '')
                 item.setTextAlignment(Qt.AlignCenter)
+                if opt in correct_set:
+                    item.setBackground(self.EXPECTED_ANSWER_BG)
                 self.answers_table.setItem(qi, oi, item)
                 self._style_answer_item(item, q, opt, marked, auto_marks)
+                # _style_answer_item() resets the foreground to the theme
+                # default for any cell that isn't a manual edit (orange/
+                # purple, both already legible on a dark background) -- so
+                # the forced white for expected-correct cells has to be
+                # applied after it, not before, or it gets wiped right back.
+                if opt in correct_set and item.data(Qt.ForegroundRole) is None:
+                    item.setForeground(self.EXPECTED_ANSWER_FG)
+            self._set_score_cell(qi, marks, correct_set)
+        self._update_total_score_label()
 
     def _update_matched_student_preview(self):
         u_clean = self.edit_u_number.text().strip().upper().replace('U', '')
@@ -906,6 +1028,8 @@ class ReviewScreen(QWidget):
     # ----- Answer grid editing -----
 
     def _toggle_answer_cell(self, row, col):
+        if col >= self.num_options:
+            return  # trailing Score column isn't a mark to toggle
         item = self.answers_table.item(row, col)
         opt = omr.OPTION_LABELS[col]
         q = row + 1
@@ -914,6 +1038,16 @@ class ReviewScreen(QWidget):
         self._session_toggled_cells.add((q, opt))
         adata = self._current_result().get('answers', {}).get(q, {})
         self._style_answer_item(item, q, opt, marked, self._auto_detected_marks(adata))
+
+        correct_set = self._correct_answers_for_page(self._current_result()).get(q, set())
+        # Same re-assertion as _load_answers_grid(): _style_answer_item()
+        # just reset the foreground to the theme default for a non-manual
+        # cell, which would wipe the forced white this expected-correct
+        # cell needs to stay readable against EXPECTED_ANSWER_BG.
+        if opt in correct_set and item.data(Qt.ForegroundRole) is None:
+            item.setForeground(self.EXPECTED_ANSWER_FG)
+        self._set_score_cell(row, self._grid_marks_for_row(row), correct_set)
+        self._update_total_score_label()
         self._mark_dirty()
 
     def _collect_marks_from_grid(self):
@@ -930,18 +1064,51 @@ class ReviewScreen(QWidget):
 
     # ----- Navigation -----
 
+    def _confirm_discard_unsaved(self):
+        """Gate for any navigation that would call _load_page() and blow
+        away the current form state.
+
+        _load_edit_form() rebuilds the ID fields and the whole answers grid
+        straight from the saved result dict, with no memory of whatever was
+        on screen -- so navigating away from a page with an unapplied toggle
+        or field edit (only the Apply button's orange tint hints at it)
+        used to discard it silently. Returns True if it's fine to proceed
+        (nothing unsaved, or the user confirmed discarding it).
+        """
+        if not self._form_dirty:
+            return True
+        reply = QMessageBox.question(
+            self, "Discard unsaved changes?",
+            "This page has answer or identification-field edits that "
+            "haven't been saved (click \"Apply correction\" to save them "
+            "first). Navigate away and discard them?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return reply == QMessageBox.Yes
+
     def _go_prev(self):
-        if self.current_index > 0:
+        if self.current_index > 0 and self._confirm_discard_unsaved():
             self._load_page(self.current_index - 1)
 
     def _go_next(self):
-        if self.current_index < len(self.all_results) - 1:
+        if self.current_index < len(self.all_results) - 1 and self._confirm_discard_unsaved():
             self._load_page(self.current_index + 1)
 
     def _on_table_row_selected(self):
         rows = self.table.selectionModel().selectedRows()
-        if rows:
-            self._load_page(rows[0].row())
+        if not rows:
+            return
+        target = rows[0].row()
+        if target == self.current_index:
+            return
+        if self._confirm_discard_unsaved():
+            self._load_page(target)
+        else:
+            # Undo the click's selection change without re-entering this
+            # handler -- _load_page() re-selects the right row itself the
+            # same (blocked-signals) way once a page actually does load.
+            self.table.blockSignals(True)
+            self.table.selectRow(self.current_index)
+            self.table.blockSignals(False)
 
     # ----- Apply correction -----
 
@@ -1041,6 +1208,15 @@ class ReviewScreen(QWidget):
         self.apply_btn.setEnabled(editable and not self._local_busy)
         self.revert_btn.setEnabled(editable and bool(r.get('_pre_edit')) and not self._local_busy)
         self.rescan_btn.setEnabled(not self._local_busy)
+        # Also block page navigation while busy: Rescan blocks the GUI
+        # thread for its OCR call, and the QApplication.processEvents()
+        # flush right before that call can otherwise let an already-queued
+        # Next/Prev/table click sneak in and change self.current_index
+        # mid-rescan -- previously nothing stopped that.
+        nav_enabled = not self._local_busy
+        self.prev_btn.setEnabled(nav_enabled and self.current_index > 0)
+        self.next_btn.setEnabled(nav_enabled and self.current_index < len(self.all_results) - 1)
+        self.table.setEnabled(nav_enabled)
 
     def _update_persist_indicator(self):
         """Orange = something Apply/Revert/Rescan touched hasn't fully
@@ -1152,6 +1328,11 @@ class ReviewScreen(QWidget):
         page_num = r.get('page')
         if page_num is None:
             return
+        # Captured now, before any blocking work or event-loop flush below
+        # can let the user navigate elsewhere -- this must stay the index
+        # of the page actually being rescanned, not whatever page happens
+        # to be on screen once the (possibly slow) OCR call returns.
+        page_index = self.current_index
 
         if not self.exam_pdf_path or not os.path.exists(self.exam_pdf_path):
             path, _ = QFileDialog.getOpenFileName(
@@ -1185,7 +1366,6 @@ class ReviewScreen(QWidget):
             self.status_label.setText("Rescan failed - see error dialog.")
             return
 
-        page_index = self.current_index
         had_pdf_page = self.pdf_page_index.get(page_index) is not None
         has_pdf_page = new_r.get('_corrected') is not None
         self.all_results[page_index] = new_r
@@ -1290,3 +1470,71 @@ class ReviewScreen(QWidget):
             return
 
         self.status_label.setText(f"Exported review PDF: {os.path.basename(path)}")
+
+    # ----- Email the review PDF -----
+
+    def _open_email_settings(self):
+        EmailSettingsDialog(self).exec()
+
+    def _send_review_email(self):
+        r = self._current_result()
+        if r.get('_corrected') is None:
+            QMessageBox.information(
+                self, "No scan available",
+                "This page failed processing and has no scanned image to export.")
+            return
+
+        u_clean = str(r.get('u_number', '') or '').split('|')[0]
+        matched_student = self.student_lookup.get(u_clean)
+        to_email = str(matched_student.get('Email', '') or '').strip() if matched_student is not None else ''
+        if not to_email:
+            QMessageBox.information(
+                self, "No email address on file",
+                "This student's record in the students list has no Email "
+                "address (only the 'llistatGGiA' roster format provides "
+                "one), or the U-Number wasn't matched to a student. Correct "
+                "the U-Number field or add an Email column to the students "
+                "list, then try again.")
+            return
+
+        settings = emu.load_email_settings()
+        app_password = emu.load_app_password(settings['address'])
+        if not settings['address'] or not app_password:
+            reply = QMessageBox.question(
+                self, "Set up email sending",
+                "You haven't configured a Gmail address / App Password yet. "
+                "Set it up now?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if reply != QMessageBox.Yes:
+                return
+            EmailSettingsDialog(self).exec()
+            settings = emu.load_email_settings()
+            app_password = emu.load_app_password(settings['address'])
+            if not settings['address'] or not app_password:
+                return  # user cancelled setup without saving usable credentials
+
+        default_name = self._default_review_export_name(r)
+        pdf_path = os.path.join(self._scratch_dir or tempfile.gettempdir(), default_name)
+        try:
+            omr.export_student_review_pdf(r, pdf_path, self.students_df,
+                                           correct_answers_by_perm=self.correct_answers_by_perm)
+        except Exception as e:
+            QMessageBox.critical(self, "Could not export PDF", str(e))
+            return
+
+        fields = emu.template_fields_for_page(r, matched_student)
+        subject = emu.fill_template(settings['subject_template'], fields)
+        body = emu.fill_template(settings['body_template'], fields)
+
+        dialog = EmailPreviewDialog(
+            to_email, subject, body, default_name,
+            settings['address'], app_password, settings['sender_name'],
+            settings['cc_self'], parent=self)
+        dialog.attachment_path = pdf_path
+        if dialog.exec() == QDialog.Accepted and dialog._sent_ok:
+            self.status_label.setText(f"Email sent to {to_email}.")
+
+        try:
+            os.remove(pdf_path)
+        except OSError:
+            pass

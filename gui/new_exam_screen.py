@@ -8,7 +8,8 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QSpinBox, QCheckBox,
     QProgressBar, QTableWidget, QTableWidgetItem, QTextEdit, QMessageBox,
-    QGroupBox, QHeaderView,
+    QGroupBox, QHeaderView, QDialog, QDialogButtonBox, QListWidget,
+    QListWidgetItem, QAbstractItemView,
 )
 
 from pdf2image import convert_from_path
@@ -100,6 +101,8 @@ class AnalysisWorker(QThread):
                 }
                 self.page_done.emit(i + 1, total, info)
 
+            omr.backfill_and_validate_groups(all_results, students_df)
+
             excel_path = os.path.join(self.output_dir, 'results.xlsx')
             self.log.emit(f"\nWriting Excel to {excel_path}...")
             omr.write_excel(all_results, students_df, correct_answers_by_perm, excel_path,
@@ -141,6 +144,114 @@ class AnalysisWorker(QThread):
             })
         except Exception as e:
             self.failed.emit(f"{e}\n\n{traceback.format_exc()}")
+
+
+class AnswerKeyIssuesDialog(QDialog):
+    """Shown before a run starts if validate_answer_key() found problems.
+
+    Lets the user open the answers file to inspect it, apply a one-click fix
+    for any issue that has a confident suggested_fix (a single mislabeled
+    Perm value), or proceed/cancel. Re-validates after every fix so the list
+    stays accurate and the "Continue" button reflects current state.
+    """
+
+    def __init__(self, answers_path, expected_num_questions, expected_num_options=None, parent=None):
+        super().__init__(parent)
+        self.answers_path = answers_path
+        self.expected_num_questions = expected_num_questions
+        self.expected_num_options = expected_num_options
+        self.setWindowTitle("Answer key problems found")
+        self.resize(640, 420)
+
+        layout = QVBoxLayout(self)
+
+        intro = QLabel(
+            "The answers file has problems that would make grading silently "
+            "wrong or incomplete for at least one permutation:"
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QAbstractItemView.NoSelection)
+        layout.addWidget(self.list_widget, stretch=1)
+
+        open_row = QHBoxLayout()
+        open_btn = QPushButton("Open answers file to review...")
+        open_btn.clicked.connect(self._open_file)
+        open_row.addWidget(open_btn)
+        self.revalidate_btn = QPushButton("Re-check file")
+        self.revalidate_btn.clicked.connect(self._revalidate)
+        open_row.addWidget(self.revalidate_btn)
+        open_row.addStretch()
+        layout.addLayout(open_row)
+
+        self.buttons = QDialogButtonBox()
+        self.continue_btn = self.buttons.addButton(
+            "Continue Anyway", QDialogButtonBox.AcceptRole)
+        self.cancel_btn = self.buttons.addButton(
+            "Cancel", QDialogButtonBox.RejectRole)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+        self._revalidate()
+
+    def _open_file(self):
+        path = os.path.abspath(self.answers_path)
+        if os.path.exists(path):
+            os.startfile(path)
+        else:
+            QMessageBox.warning(self, "Not found", f"File not found:\n{path}")
+
+    def _apply_fix(self, issue):
+        fix = issue['suggested_fix']
+        try:
+            omr.apply_answer_key_row_fix(self.answers_path, fix['row'], fix['new_perm'])
+        except Exception as e:
+            QMessageBox.critical(self, "Fix failed", str(e))
+            return
+        self._revalidate()
+
+    def _revalidate(self):
+        self.list_widget.clear()
+        try:
+            self.issues = omr.validate_answer_key(
+                self.answers_path, expected_num_questions=self.expected_num_questions,
+                expected_num_options=self.expected_num_options)
+        except Exception as e:
+            self.issues = []
+            self.list_widget.addItem(f"Could not re-validate file: {e}")
+            return
+
+        if not self.issues:
+            item = QListWidgetItem("No problems found — the file is clean now.")
+            self.list_widget.addItem(item)
+            self.continue_btn.setText("Continue")
+            return
+
+        self.continue_btn.setText("Continue Anyway")
+        for issue in self.issues:
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(4, 2, 4, 2)
+
+            text = issue['message']
+            if issue['suggested_fix']:
+                text += "\n  → " + issue['suggested_fix']['description']
+            label = QLabel(text)
+            label.setWordWrap(True)
+            row_layout.addWidget(label, stretch=1)
+
+            if issue['suggested_fix']:
+                fix_btn = QPushButton("Apply fix")
+                fix_btn.clicked.connect(lambda _checked, iss=issue: self._apply_fix(iss))
+                row_layout.addWidget(fix_btn)
+
+            item = QListWidgetItem()
+            item.setSizeHint(row_widget.sizeHint())
+            self.list_widget.addItem(item)
+            self.list_widget.setItemWidget(item, row_widget)
 
 
 class FileRow(QWidget):
@@ -323,6 +434,19 @@ class NewExamScreen(QWidget):
         if not answers or not os.path.exists(answers):
             QMessageBox.warning(self, "Missing file", "Please select a valid answers file.")
             return
+
+        try:
+            issues = omr.validate_answer_key(
+                answers, expected_num_questions=self.questions_spin.value(),
+                expected_num_options=self.options_spin.value())
+        except Exception as e:
+            QMessageBox.critical(self, "Answers file error", str(e))
+            return
+        if issues:
+            dialog = AnswerKeyIssuesDialog(answers, self.questions_spin.value(),
+                                            self.options_spin.value(), self)
+            if dialog.exec() != QDialog.Accepted:
+                return  # user cancelled
 
         self.output_dir = output_dir
         self.table.setRowCount(0)

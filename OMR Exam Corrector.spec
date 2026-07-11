@@ -6,7 +6,12 @@ a = Analysis(
     pathex=[],
     binaries=[('poppler_bin', 'poppler_bin')],
     datas=[('assets', 'assets')],
-    hiddenimports=[],
+    # keyring (added for the email feature) picks its backend at runtime via
+    # importlib.metadata entry points, which PyInstaller's static import
+    # analysis can't see -- without this, the frozen .exe raises
+    # "No recommended backend was available" the first time email settings
+    # are opened, even though it works fine when run from source.
+    hiddenimports=['keyring.backends.Windows'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

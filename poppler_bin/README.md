@@ -13,7 +13,7 @@ source if you already have Poppler installed and on PATH.
    runtime and won't run on a machine without it installed):
    https://github.com/oschwartz10612/poppler-windows/releases (grab the
    `Release-*.zip` asset)
-2. From the zip's `Library/bin/` folder, copy these 17 files into this
+2. From the zip's `Library/bin/` folder, copy these 18 files into this
    folder (`poppler_bin/`):
 
    ```

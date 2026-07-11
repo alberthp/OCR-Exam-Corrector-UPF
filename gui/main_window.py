@@ -6,7 +6,7 @@ QStackedWidget.setCurrentWidget() calls.  No child screen needs to know
 about the others.
 """
 
-from PySide6.QtWidgets import QMainWindow, QStackedWidget
+from PySide6.QtWidgets import QMainWindow, QStackedWidget, QMessageBox
 
 from gui.start_screen import StartScreen
 from gui.new_exam_screen import NewExamScreen
@@ -58,3 +58,29 @@ class MainWindow(QMainWindow):
         """
         self.review_screen.load(run_state)
         self.stack.setCurrentWidget(self.review_screen)
+
+    def closeEvent(self, event):
+        """Block closing while a save or preview render is still in flight.
+
+        Nothing previously waited for review_screen's background QThreads
+        (_SaveWorker / _PreviewRenderWorker) before the process could exit.
+        Confirmed by testing: closing mid-render can hard-crash the process
+        (a native STATUS_STACK_BUFFER_OVERRUN, not a catchable Python
+        exception) -- and for a save specifically, that same abrupt exit
+        happens while results.xlsx/annotated_review.pdf may be mid-write,
+        risking a corrupted output file, not just a crash. Simplest safe
+        fix: refuse to close while any of that is running and say so: these
+        operations normally finish in well under a second (a save) to a
+        few seconds (a page render), so asking the user to try again a
+        moment later is a minor inconvenience next to the alternative.
+        """
+        rs = self.review_screen
+        busy = rs._local_busy or bool(rs._pending_sync_workers) or bool(rs._pending_preview_workers)
+        if busy:
+            QMessageBox.information(
+                self, "Please wait",
+                "A save or preview render is still finishing. Please wait "
+                "a moment and try closing again.")
+            event.ignore()
+            return
+        event.accept()
