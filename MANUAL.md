@@ -1,6 +1,6 @@
 # OMR Exam Corrector — User Manual
 
-**Version 1.5** · Albert Hernansanz ([albert.hernansanz@upf.edu](mailto:albert.hernansanz@upf.edu))
+**Version 1.6** · Albert Hernansanz ([albert.hernansanz@upf.edu](mailto:albert.hernansanz@upf.edu))
 
 ---
 
@@ -113,6 +113,18 @@ form; the app grades it against the matching key automatically.
 
 ## 3. Start screen
 
+On launch, a small "Starting..." window appears first, showing the app
+name/version and a log of what's loading (v1.6) — first launch on a new
+machine can take a while (antivirus/EDR scanning an unfamiliar executable,
+cold disk cache for the image-processing libraries), and this is there so
+that wait doesn't look like the app hung or crashed with nothing on
+screen. While a step is in progress, a "." is added to the log once a
+second as a heartbeat, so it's clear the app is still working rather than
+stuck — the window stays genuinely responsive throughout (the slow work
+happens in the background), so it shouldn't get marked "(Not Responding)"
+by Windows either. It closes itself automatically once the main window is
+ready.
+
 ![Start screen](assets/screenshots/01-start-screen.png)
 
 When you launch the app you see two main buttons:
@@ -152,7 +164,13 @@ Use **Browse…** next to each field or type the path directly.
 
 ### 4.3 Run the analysis
 
-Click **Run Analysis**. The progress bar advances as each page is processed,
+**Run Analysis** is coloured a soft **red** until the three required inputs
+(scanned PDF, students list, answers file) are all filled in, and turns
+**green** once they are (v1.6) — the output directory doesn't count, since
+it already has a default. It's still clickable either way; red just means
+clicking it will show a "please select a file" message instead of running.
+
+Click it once green. The progress bar advances as each page is processed,
 and the table fills with live results: page number, status, detected
 U-number, matched student name, DNI, permutation, and number of answered
 questions.

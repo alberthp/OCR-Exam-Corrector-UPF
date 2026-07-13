@@ -7,7 +7,8 @@ This project had **zero automated tests** before this suite — every bug
 found and fixed in the two prior review passes ([`RELEASE_REVIEW_v1.4.md`](RELEASE_REVIEW_v1.4.md))
 was caught by disposable, ad-hoc scripts that were written once, verified,
 and deleted. This suite turns that one-off verification into a permanent
-regression net: **156 tests**, **100% passing**, run in **~61 seconds**
+regression net: **166 tests**, **100% passing** (of the ones that run —
+see the integration-skip note in Results below), run in **~66 seconds**
 (~14 seconds without the real-data integration pass).
 
 ## How to run it
@@ -47,7 +48,7 @@ be tested:
 |---|---|---|---|---|
 | Pure logic | `test_decode_identifier.py`, `test_grup_and_perm_normalization.py`, `test_scoring_and_excel.py` | 50 | No | No |
 | File loading | `test_load_students.py`, `test_answer_key.py`, `test_email_utils.py` | 64 | No | No |
-| GUI state | `test_review_screen_gui.py`, `test_main_window_gui.py` | 27 | Offscreen Qt platform | No |
+| GUI state | `test_review_screen_gui.py`, `test_main_window_gui.py`, `test_new_exam_screen_gui.py`, `test_startup_splash_gui.py` | 37 | Offscreen Qt platform | No |
 | Shipped examples | `test_examples.py` | 9 | No | No (synthetic `examples/` files) |
 | End-to-end | `test_integration_real_data.py` | 6 | No | Yes (skips if absent) |
 
@@ -66,6 +67,13 @@ body-template `.txt` file storage (migration from the old JSON-embedded
 template, round-tripping, `open_body_template_file()`) landed in
 `test_email_utils.py`; the new search box, manual email entry/persistence,
 and the `exam_type` whole-run setting landed in `test_review_screen_gui.py`.
+
+**v1.6 additions** are two new GUI-state files: `test_new_exam_screen_gui.py`
+covers the Run Analysis button's red/not-ready vs. green/ready colour
+state, and `test_startup_splash_gui.py` covers the new startup window
+(including a static-source-inspection test that `gui/app_info.py` stays
+free of heavy imports -- see that file's docstring for why that's load-bearing,
+not just tidiness).
 
 ### Every regression test traces to a specific, previously-real bug
 
@@ -119,7 +127,7 @@ every row is a real bug this suite would now catch if it came back.
 ## Results
 
 ```
-156 passed in 61.11s
+165 passed, 1 skipped in 66.03s
 ```
 
 | Test file | Tests | Result | Notes |
@@ -131,10 +139,12 @@ every row is a real bug this suite would now catch if it came back.
 | `test_grup_and_perm_normalization.py` | 23 | ✅ all pass | `decode_grup`, both `_normalize_*_value` helpers, `backfill_and_validate_groups` |
 | `test_load_students.py` | 16 | ✅ all pass | All 4 student-list formats + encoding/blank-cell/duplicate edge cases |
 | `test_main_window_gui.py` | 4 | ✅ all pass | `closeEvent` busy-state guard |
+| `test_new_exam_screen_gui.py` | 5 | ✅ all pass | Run Analysis button's red/green colour state vs. which required fields are filled |
 | `test_review_screen_gui.py` | 23 | ✅ all pass | Navigation confirmation, busy-lock, grid boundaries, zero-page guard, search/filter, manual email entry, `exam_type` persistence |
 | `test_scoring_and_excel.py` | 16 | ✅ all pass | `score_question` boundaries, `write_excel` with empty/missing/orphan inputs |
-| `test_integration_real_data.py` | 6 | ✅ all pass | Real answer key, both real rosters, real PDF DPI detection, full OCR pipeline (11/11 pages, 45.9s) |
-| **Total** | **156** | **✅ 156/156** | 61.11s wall time |
+| `test_startup_splash_gui.py` | 5 | ✅ all pass | Startup splash construction, no-close-button guard, log text, `gui.app_info` import-weight check |
+| `test_integration_real_data.py` | 6 | 5 pass, 1 skip | Real answer key, both real rosters (one currently renamed locally, see below), real PDF DPI detection, full OCR pipeline (11/11 pages, 45.9s) |
+| **Total** | **166** | **✅ 165/166** (1 self-skip) | 66.03s wall time |
 
 One test failure surfaced during development — `test_full_fix_workflow_resolves_all_issues`
 initially used a synthetic answer-key fixture that didn't fully mirror the
@@ -146,10 +156,13 @@ structure — the suite (and the underlying `validate_answer_key`/
 `apply_answer_key_row_fix` code) passed correctly. No application code
 changed as a result.
 
-No other failures occurred. No test was skipped in this run — all four
-real data files (`LSDS Retake Juliol2026 Questionnarie.pdf`,
-`LSDS_Retake2026_PermALL_Fixed.csv`, `courseid_91223_participants.csv`,
-`llistatGGiA (8).xls`) were present.
+No other failures occurred. One test self-skipped as designed: the local
+`llistatGGiA (8).xls` roster the integration suite looks for has since
+been renamed on disk (to `llistatGGiALSDS.xls`, outside this project's
+control — it's gitignored, private, user-managed data) — the test skips
+itself cleanly rather than failing, exactly as it's meant to when a real
+data file isn't present under the expected name. Not a regression; every
+other real data file was present and every non-integration test passed.
 
 ---
 

@@ -10,11 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 import omr_correct as omr
-
-# Bump this constant with each meaningful release.
-APP_VERSION = "1.5"
-APP_AUTHOR = "Albert Hernansanz (with Claude)"
-APP_EMAIL = "albert.hernansanz@upf.edu"
+from gui.app_info import APP_VERSION, APP_AUTHOR, APP_EMAIL
 
 # sys._MEIPASS is set by PyInstaller to the bundle's extraction directory at
 # runtime (both --onefile and --onedir); it's absent when running from source,

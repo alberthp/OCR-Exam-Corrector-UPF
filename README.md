@@ -91,7 +91,7 @@ pytest                        # everything, including a real OCR pass (~1 min)
 pytest -m "not integration"   # fast unit/GUI suite only (~14s, no real exam data needed)
 ```
 
-156 tests, organized around every bug class found in past review passes —
+166 tests, organized around every bug class found in past review passes —
 see [TEST_SUITE.md](TEST_SUITE.md) for the full design and latest results.
 
 ## Standalone Windows executable
@@ -130,7 +130,9 @@ Three things worth knowing when building or distributing it:
 - **First launch on a new machine may be slow** (antivirus/EDR products
   often deep-scan an unsigned, unfamiliar multi-DLL executable the first
   time they see it). On a managed/corporate machine where it never finishes,
-  ask IT to whitelist the app's folder or file hash.
+  ask IT to whitelist the app's folder or file hash. A startup window (v1.6)
+  shows what's loading during this wait, so it doesn't look like the app
+  hung with nothing on screen — but the wait itself is unavoidable.
 - **`keyring` (used by the email feature) needs an explicit hidden-import**:
   it picks its OS credential-store backend at runtime via `importlib.metadata`
   entry points, which PyInstaller's static import analysis can't see. This
@@ -140,6 +142,24 @@ Three things worth knowing when building or distributing it:
   matching backend module too, or "Email settings..." fails in the frozen
   build with "No recommended backend was available" despite working fine
   from source.
+
+## What's new in v1.6
+
+- **Startup window**: a small window appears the moment the app launches,
+  showing the name/version and a log of what's loading — first launch on a
+  new machine can take a while (antivirus/EDR scanning, cold disk cache for
+  the image-processing libraries), and previously nothing appeared on
+  screen at all during that wait, which could look like the app had hung
+  or crashed. The slow imports run on a background thread while this
+  window stays genuinely responsive and adds a heartbeat dot once a second,
+  so it never looks frozen or gets marked "(Not Responding)" by Windows. It
+  closes itself once the main window is ready.
+- **Run Analysis is colour-coded**: a soft red until the scanned PDF,
+  students list, and answers file are all selected, green once they are —
+  green matches the same "Correct" colour used elsewhere in the app (the
+  annotated PDF's legend), while red is deliberately a lighter, easier-on-
+  the-eyes tone rather than that same legend's saturated "Wrong" red, since
+  this button sits on screen throughout instead of appearing briefly.
 
 ## What's new in v1.5
 
@@ -234,12 +254,14 @@ omr_correct.py            OCR/grading pipeline + CLI entry point
 omr_gui.py                GUI entry point (also bootstraps bundled Poppler)
 email_utils.py             Gmail SMTP send + credential/template storage for review-PDF emails
 gui/
+  app_info.py                app name/version/author constants (no heavy imports -- see docstring)
+  startup_splash.py          "loading..." window shown while omr_gui.py's slow imports run
   start_screen.py           landing screen (new exam / review existing)
   new_exam_screen.py        input form + background OCR run
   review_screen.py          page-by-page review/correction screen
   email_dialogs.py          email settings + send-preview dialogs
   main_window.py            wires the three screens together
-tests/                     pytest suite (156 tests) -- see TEST_SUITE.md
+tests/                     pytest suite (166 tests) -- see TEST_SUITE.md
   conftest.py                shared fixtures (synthetic data only)
   test_*.py                  one file per module/concern
 assets/
