@@ -1,6 +1,6 @@
 # OMR Exam Corrector — User Manual
 
-**Version 1.6** · Albert Hernansanz ([albert.hernansanz@upf.edu](mailto:albert.hernansanz@upf.edu))
+**Version 1.7** · Albert Hernansanz ([albert.hernansanz@upf.edu](mailto:albert.hernansanz@upf.edu))
 
 ---
 
@@ -160,15 +160,17 @@ Use **Browse…** next to each field or type the path directly.
 | **Number of questions** | How many questions to grade (1–100). Must match your answer key. |
 | **Options per question** | Number of answer options per question (2–10, default 4). |
 | **Source DPI** | Leave **Auto-detect** checked unless auto-detection fails. |
-| **Exam type** (v1.5) | **Midterm**, **Final**, or **Retake** — not graded or detected from the scan, just carried through to the review screen and substituted into review-PDF emails via `{exam_type}` (see [section 10](#10-emailing-a-student-their-review-pdf)). Leave blank if not applicable; it can also be set or corrected later from the review screen. |
+| **Exam type** (v1.5) | **Midterm**, **Final**, or **Retake** — not graded or detected from the scan, just carried through to the review screen and substituted into review-PDF emails via `{exam_type}` (see [section 10](#10-emailing-a-student-their-review-pdf)). Required for **Run Analysis** to turn green (v1.7 — see below), but not blocking: it can also be set or corrected later from the review screen if you'd rather pick it after the fact. |
 
 ### 4.3 Run the analysis
 
-**Run Analysis** is coloured a soft **red** until the three required inputs
-(scanned PDF, students list, answers file) are all filled in, and turns
-**green** once they are (v1.6) — the output directory doesn't count, since
-it already has a default. It's still clickable either way; red just means
-clicking it will show a "please select a file" message instead of running.
+**Run Analysis** is coloured a soft **red** until all four inputs (scanned
+PDF, students list, answers file, and Exam type) are set, and turns
+**green** once they are (v1.6, extended to include Exam type in v1.7) —
+the output directory doesn't count, since it already has a default. It's
+still clickable either way; for a missing file, clicking while red shows a
+"please select a file" message instead of running, but a missing Exam
+type alone doesn't block the run, only the button's colour.
 
 Click it once green. The progress bar advances as each page is processed,
 and the table fills with live results: page number, status, detected

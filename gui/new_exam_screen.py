@@ -299,15 +299,12 @@ class NewExamScreen(QWidget):
     finished_run = Signal(dict)
     back_requested = Signal()
 
-    # Green matches the "Correct" colour used everywhere else in the app
-    # (the annotated PDF's legend, gui/review_screen.py). Red is a
-    # deliberately softer, lighter tone rather than that same legend's
-    # saturated "Wrong" red -- this button sits on screen the whole time
-    # someone is filling in the form, not just flashed briefly like a
-    # grading colour, so a harsh red here reads as alarming rather than
-    # just "not ready yet".
+    # Both a deliberately soft, easy-on-the-eyes pastel pair -- not the
+    # legend's saturated Correct/Wrong green/red, since this button sits
+    # on screen the whole time someone is filling in the form, not just
+    # flashed briefly like a grading colour.
     NOT_READY_STYLE = "background-color: #FFCDD2; color: #B71C1C;"
-    READY_STYLE = "background-color: #00BD00; color: white;"
+    READY_STYLE = "background-color: #C8E6C9; color: #1B5E20;"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -352,15 +349,17 @@ class NewExamScreen(QWidget):
         out_row.addStretch()
         layout.addLayout(out_row)
 
-        # The three required inputs (output directory has a sensible default
-        # and isn't required) -- Run Analysis is red until all three are
+        # The four required inputs (output directory has a sensible default
+        # and isn't required) -- Run Analysis is red until all four are
         # filled in, green once it's actually ready to click.
         for row in (self.pdf_row, self.students_row, self.answers_row):
             row.edit.textChanged.connect(self._update_run_btn_style)
+        self.exam_type_combo.currentTextChanged.connect(self._update_run_btn_style)
         self._update_run_btn_style()
 
     def _update_run_btn_style(self):
-        ready = bool(self.pdf_row.text() and self.students_row.text() and self.answers_row.text())
+        ready = bool(self.pdf_row.text() and self.students_row.text()
+                     and self.answers_row.text() and self.exam_type_combo.currentText())
         self.run_btn.setStyleSheet(self.READY_STYLE if ready else self.NOT_READY_STYLE)
 
     def _build_inputs_group(self):

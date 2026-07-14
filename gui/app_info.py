@@ -9,6 +9,6 @@ give feedback about.
 """
 
 # Bump this constant with each meaningful release.
-APP_VERSION = "1.6"
+APP_VERSION = "1.7"
 APP_AUTHOR = "Albert Hernansanz (with Claude)"
 APP_EMAIL = "albert.hernansanz@upf.edu"

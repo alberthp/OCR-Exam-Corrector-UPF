@@ -91,7 +91,7 @@ pytest                        # everything, including a real OCR pass (~1 min)
 pytest -m "not integration"   # fast unit/GUI suite only (~14s, no real exam data needed)
 ```
 
-166 tests, organized around every bug class found in past review passes —
+169 tests, organized around every bug class found in past review passes —
 see [TEST_SUITE.md](TEST_SUITE.md) for the full design and latest results.
 
 ## Standalone Windows executable
@@ -142,6 +142,30 @@ Three things worth knowing when building or distributing it:
   matching backend module too, or "Email settings..." fails in the frozen
   build with "No recommended backend was available" despite working fine
   from source.
+
+## What's new in v1.7
+
+- **Stability fix for a packaged-.exe crash**: v1.6's startup window (see
+  below) imported `gui.main_window` — which touches `PySide6.QtWidgets` —
+  from a background thread. Pure Python imports are thread-safe, but
+  PySide6/Qt can do thread-affinity-sensitive static initialization the
+  *first* time one of its submodules is touched; doing that off the main
+  thread silently corrupted Qt's internal state without crashing
+  immediately, only to fail unpredictably later (confirmed against two
+  real native crashes in the packaged `.exe`, both faulting in
+  `Qt6Core.dll` at the same offset, well after startup had already
+  finished — once mid-scan, once mid-review). `gui.main_window` is now
+  imported back on the main thread; only the genuinely Qt-independent
+  libraries (cv2, numpy, pandas, scipy, pdf2image, reportlab) still run on
+  the background thread.
+- **Run Analysis now also requires an Exam type**: the button used to turn
+  green as soon as the three files were selected, before Exam type had
+  been set. It's a required field for the green state now, though it
+  still doesn't block the run itself (Exam type can be set later from the
+  review screen).
+- **Softer Run Analysis green**: matching the softer red from v1.6, the
+  ready-state green is now a lighter pastel tone instead of the legend's
+  saturated "Correct" green.
 
 ## What's new in v1.6
 
@@ -261,7 +285,7 @@ gui/
   review_screen.py          page-by-page review/correction screen
   email_dialogs.py          email settings + send-preview dialogs
   main_window.py            wires the three screens together
-tests/                     pytest suite (166 tests) -- see TEST_SUITE.md
+tests/                     pytest suite (169 tests) -- see TEST_SUITE.md
   conftest.py                shared fixtures (synthetic data only)
   test_*.py                  one file per module/concern
 assets/

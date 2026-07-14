@@ -7,8 +7,8 @@ This project had **zero automated tests** before this suite — every bug
 found and fixed in the two prior review passes ([`RELEASE_REVIEW_v1.4.md`](RELEASE_REVIEW_v1.4.md))
 was caught by disposable, ad-hoc scripts that were written once, verified,
 and deleted. This suite turns that one-off verification into a permanent
-regression net: **166 tests**, **100% passing** (of the ones that run —
-see the integration-skip note in Results below), run in **~66 seconds**
+regression net: **169 tests**, **100% passing** (of the ones that run —
+see the integration-skip note in Results below), run in **~55 seconds**
 (~14 seconds without the real-data integration pass).
 
 ## How to run it
@@ -48,7 +48,7 @@ be tested:
 |---|---|---|---|---|
 | Pure logic | `test_decode_identifier.py`, `test_grup_and_perm_normalization.py`, `test_scoring_and_excel.py` | 50 | No | No |
 | File loading | `test_load_students.py`, `test_answer_key.py`, `test_email_utils.py` | 64 | No | No |
-| GUI state | `test_review_screen_gui.py`, `test_main_window_gui.py`, `test_new_exam_screen_gui.py`, `test_startup_splash_gui.py` | 37 | Offscreen Qt platform | No |
+| GUI state | `test_review_screen_gui.py`, `test_main_window_gui.py`, `test_new_exam_screen_gui.py`, `test_startup_splash_gui.py` | 39 | Offscreen Qt platform | No |
 | Shipped examples | `test_examples.py` | 9 | No | No (synthetic `examples/` files) |
 | End-to-end | `test_integration_real_data.py` | 6 | No | Yes (skips if absent) |
 
@@ -74,6 +74,17 @@ state, and `test_startup_splash_gui.py` covers the new startup window
 (including a static-source-inspection test that `gui/app_info.py` stays
 free of heavy imports -- see that file's docstring for why that's load-bearing,
 not just tidiness).
+
+**v1.7** was a stability fix (a packaged-.exe crash traced to importing
+`gui.main_window` off the main thread -- see README.md's "What's new in
+v1.7") plus extending the Run Analysis ready-state to also require Exam
+type; `test_new_exam_screen_gui.py` grew two regression tests for the
+latter (files-alone-isn't-enough-anymore, and clearing Exam type turns
+the button red again). The crash fix itself isn't unit-testable (it's a
+threading/import-order property of the packaged executable, not a
+function with a return value) -- it was instead verified by scripting the
+real app (New exam -> Review) end to end against the real files the crash
+was originally reported against.
 
 ### Every regression test traces to a specific, previously-real bug
 
@@ -127,7 +138,7 @@ every row is a real bug this suite would now catch if it came back.
 ## Results
 
 ```
-165 passed, 1 skipped in 66.03s
+168 passed, 1 skipped in 55.32s
 ```
 
 | Test file | Tests | Result | Notes |
@@ -139,12 +150,12 @@ every row is a real bug this suite would now catch if it came back.
 | `test_grup_and_perm_normalization.py` | 23 | ✅ all pass | `decode_grup`, both `_normalize_*_value` helpers, `backfill_and_validate_groups` |
 | `test_load_students.py` | 16 | ✅ all pass | All 4 student-list formats + encoding/blank-cell/duplicate edge cases |
 | `test_main_window_gui.py` | 4 | ✅ all pass | `closeEvent` busy-state guard |
-| `test_new_exam_screen_gui.py` | 5 | ✅ all pass | Run Analysis button's red/green colour state vs. which required fields are filled |
+| `test_new_exam_screen_gui.py` | 7 | ✅ all pass | Run Analysis button's red/green colour state vs. which required fields (incl. Exam type, v1.7) are filled |
 | `test_review_screen_gui.py` | 23 | ✅ all pass | Navigation confirmation, busy-lock, grid boundaries, zero-page guard, search/filter, manual email entry, `exam_type` persistence |
 | `test_scoring_and_excel.py` | 16 | ✅ all pass | `score_question` boundaries, `write_excel` with empty/missing/orphan inputs |
 | `test_startup_splash_gui.py` | 5 | ✅ all pass | Startup splash construction, no-close-button guard, log text, `gui.app_info` import-weight check |
 | `test_integration_real_data.py` | 6 | 5 pass, 1 skip | Real answer key, both real rosters (one currently renamed locally, see below), real PDF DPI detection, full OCR pipeline (11/11 pages, 45.9s) |
-| **Total** | **166** | **✅ 165/166** (1 self-skip) | 66.03s wall time |
+| **Total** | **169** | **✅ 168/169** (1 self-skip) | 55.32s wall time |
 
 One test failure surfaced during development — `test_full_fix_workflow_resolves_all_issues`
 initially used a synthetic answer-key fixture that didn't fully mirror the

@@ -51,7 +51,7 @@ from PySide6.QtWidgets import QApplication
 
 
 class _StartupImportWorker(QThread):
-    """Runs the slow library imports off the main thread.
+    """Runs the slow *non-GUI* library imports off the main thread.
 
     A plain sequence of `import` calls on the main thread -- even split
     into stages with processEvents() between them -- still leaves the
@@ -59,18 +59,26 @@ class _StartupImportWorker(QThread):
     for however long any *single* import call blocks, since nothing pumps
     the event loop *during* one. Running them here instead means the main
     thread's event loop never stops running, so the splash stays
-    genuinely responsive (repaints, a heartbeat timer, window drag) the
-    whole time, not just between stages.
+    genuinely responsive the whole time, not just between stages.
 
-    Only imports modules here, never constructs any Qt widgets: importing
-    gui.main_window (and everything it imports) only executes class
-    *definitions*, not `__init__` calls -- Qt requires widgets to be
-    created on the same thread as QApplication, so MainWindow() itself is
-    still instantiated on the main thread, after this worker finishes.
+    Deliberately does NOT import gui.main_window (or anything else that
+    touches PySide6.QtWidgets) here, even though that's pure class
+    *definitions*, not widget construction. An earlier version of this
+    code did exactly that reasoning it was safe -- it wasn't: two packaged
+    (.exe) crashes in the wild both faulted in Qt6Core.dll at the same
+    offset, well after startup had already finished (mid-scan, mid-review),
+    consistent with PySide6/Qt doing thread-affinity-sensitive static
+    initialization the *first* time one of its submodules is touched --
+    if that first touch happens on a worker thread instead of the main
+    thread, it can silently corrupt Qt's internal bookkeeping without
+    crashing immediately, only to fail unpredictably later. cv2/numpy/
+    pandas/scipy/pdf2image/reportlab have no such risk (no Qt dependency
+    at all), so only those run here; gui.main_window is imported back on
+    the main thread in main()'s _on_done, right before it's instantiated.
     """
 
     stage = Signal(str)
-    done = Signal(object)   # the MainWindow class, ready to instantiate
+    done = Signal()
     failed = Signal(str)
 
     def run(self):
@@ -86,10 +94,7 @@ class _StartupImportWorker(QThread):
             import pdf2image  # noqa: F401
             import reportlab  # noqa: F401
 
-            self.stage.emit("Loading application...")
-            from gui.main_window import MainWindow
-
-            self.done.emit(MainWindow)
+            self.done.emit()
         except Exception as e:
             import traceback
             self.failed.emit(f"{e}\n\n{traceback.format_exc()}")
@@ -117,14 +122,21 @@ def main():
     worker = _StartupImportWorker()
     worker.stage.connect(splash.log)
 
-    def _on_done(main_window_cls):
+    def _on_done():
         heartbeat.stop()
+        splash.log("Loading application...")
+        app.processEvents()
+        # Imported here, on the main thread, deliberately -- see
+        # _StartupImportWorker's docstring for why this specifically must
+        # not happen on the worker thread.
+        from gui.main_window import MainWindow
+
         splash.log("Building interface...")
         app.processEvents()
         # Parented to `app` so the reference survives after this closure
         # returns -- otherwise nothing else in main() holds onto it and it
         # would be garbage-collected out from under the running window.
-        app.main_window = main_window_cls()
+        app.main_window = MainWindow()
         splash.log("Ready.")
         app.main_window.show()
         splash.close()
