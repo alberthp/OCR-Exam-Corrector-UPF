@@ -1,6 +1,6 @@
 # OMR Exam Corrector — User Manual
 
-**Version 1.7** · Albert Hernansanz ([albert.hernansanz@upf.edu](mailto:albert.hernansanz@upf.edu))
+**Version 1.8** · Albert Hernansanz ([albert.hernansanz@upf.edu](mailto:albert.hernansanz@upf.edu))
 
 ---
 
