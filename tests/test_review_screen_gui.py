@@ -11,6 +11,7 @@ background QThread was still running could hard-crash the process.
 
 import os
 
+import numpy as np
 import pandas as pd
 import pytest
 from PySide6.QtWidgets import QMessageBox
@@ -34,13 +35,30 @@ def settle(screen):
     still-running worker at process/object teardown crashes natively
     (confirmed by testing) -- see the closeEvent fix in
     gui/main_window.py for the equivalent real-app protection.
+
+    Loops until both worker lists are genuinely empty rather than a single
+    snapshot-then-wait pass: ReviewScreen.PREVIEW_WORKER_CAP means a
+    _PreviewRenderWorker can be started *reactively*, from inside another
+    worker's done-signal handler, while this function's own
+    app.processEvents() calls are what deliver that first signal -- a
+    fixed-count pass can finish while that second, reactively-started
+    worker is still running, and a still-running QThread at test teardown
+    (when `screen` itself gets garbage-collected) is exactly the native
+    "destroyed while running" crash this function exists to prevent.
+    Confirmed by testing: a fixed 20-iteration pass let this happen.
     """
     import PySide6.QtWidgets as qw
     app = qw.QApplication.instance()
-    for worker in list(getattr(screen, "_pending_preview_workers", [])):
-        worker.wait(5000)
-    for worker in list(getattr(screen, "_pending_sync_workers", [])):
-        worker.wait(5000)
+    for _ in range(200):
+        pending = (list(getattr(screen, "_pending_preview_workers", []))
+                   + list(getattr(screen, "_pending_sync_workers", [])))
+        if not pending:
+            break
+        for worker in pending:
+            worker.wait(5000)
+        app.processEvents()
+    else:
+        raise AssertionError("settle(): workers still pending after 200 iterations")
     for _ in range(20):
         app.processEvents()
 
@@ -84,6 +102,66 @@ def test_load_with_zero_pages_does_not_crash(review_screen, backing_files):
     assert review_screen.page_label.text() == "Page 0 / 0"
     assert not review_screen.prev_btn.isEnabled()
     assert not review_screen.next_btn.isEnabled()
+
+
+# ----- Preview-worker concurrency cap (regression) -----
+#
+# Found via a real native STATUS_STACK_BUFFER_OVERRUN crash reproduced by
+# rapid, zero-delay page navigation through a packaged .exe: navigation is
+# only gated by _local_busy (which guards saves), not by pending preview
+# renders, so fast repeated navigation could spawn many concurrent
+# _PreviewRenderWorker threads -- each launching its own poppler subprocess
+# against the same PDF file. Bisected on real data: 5 concurrent renders
+# never crashed across repeated trials, 6+ crashed with meaningful,
+# non-deterministic probability (the signature of a genuine race, not a
+# hard resource limit). Fixed by capping concurrent workers
+# (PREVIEW_WORKER_CAP) and re-checking the current target reactively once
+# a slot frees, rather than firing a new worker on every navigation call.
+
+def test_preview_worker_cap_never_exceeded_during_rapid_navigation(review_screen, backing_files):
+    results = []
+    for i in range(10):
+        results.append({
+            "page": i + 1, "status": "OK",
+            "_corrected": np.zeros((10, 10, 3), dtype="uint8"),
+            "u_number": f"{i:06d}", "u_status": "OK", "dni": "1" * 8,
+            "parcial": "1", "permut": "1", "grup": "1", "answers": {},
+        })
+    rs = make_run_state(results, backing_files, num_questions=1, num_options=4)
+    review_screen.load(rs)
+
+    # Rapidly request every page without waiting for any render to finish
+    # (mirrors the zero-delay navigation that reproduced the real crash).
+    for i in range(len(results)):
+        review_screen._load_page(i)
+        assert len(review_screen._pending_preview_workers) <= review_screen.PREVIEW_WORKER_CAP, (
+            f"exceeded PREVIEW_WORKER_CAP after navigating to page {i}: "
+            f"{len(review_screen._pending_preview_workers)} workers in flight"
+        )
+    settle(review_screen)
+
+
+def test_failed_preview_render_does_not_retry_forever(review_screen, backing_files):
+    """backing_files' PDF is deliberately not real PDF content, so every
+    render attempt fails -- regression test for a bug introduced (and
+    fixed) alongside the concurrency cap above: reactively starting the
+    next worker unconditionally on every completion, including a failed
+    one, re-requested the *same* still-failing page forever, since a
+    failed render is never cached and so never looks "already resolved".
+    Confirmed by testing to hang indefinitely before the fix; settle()
+    itself would now raise AssertionError rather than hang if this
+    regressed, but this test names the property directly.
+    """
+    result = {
+        "page": 1, "status": "OK",
+        "_corrected": np.zeros((10, 10, 3), dtype="uint8"),
+        "u_number": "000001", "u_status": "OK", "dni": "1" * 8,
+        "parcial": "1", "permut": "1", "grup": "1", "answers": {},
+    }
+    rs = make_run_state([result], backing_files, num_questions=1, num_options=4)
+    review_screen.load(rs)
+    settle(review_screen)  # would hang/raise here if the retry-loop regressed
+    assert review_screen.preview_label.text().startswith("Could not render preview")
 
 
 # ----- num_options boundaries in the answers grid -----

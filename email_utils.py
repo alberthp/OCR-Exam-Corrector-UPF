@@ -70,6 +70,17 @@ def _config_dir():
     """OS-appropriate per-user local config directory -- deliberately NOT
     derived from the project's own location, since that may be inside a
     cloud-synced folder (see module docstring).
+
+    Falls back to a directory under the system temp folder if the normal
+    location can't be created (e.g. a locked-down APPDATA in a managed
+    corporate environment). Every caller of this function used to call it
+    with no try/except at all -- confirmed by testing that a makedirs
+    failure here raised straight out of e.g. opening the Email settings
+    dialog or clicking "Send by email", inconsistent with the rest of this
+    app's convention of catching risky calls and showing a friendly dialog
+    instead of a raw traceback. The temp-folder fallback loses settings
+    across reboots (temp dirs get cleared), but that's strictly better
+    than the feature being permanently unusable.
     """
     if sys.platform == 'win32':
         base = os.environ.get('APPDATA') or os.path.expanduser('~')
@@ -78,8 +89,14 @@ def _config_dir():
     else:
         base = os.environ.get('XDG_CONFIG_HOME') or os.path.expanduser('~/.config')
     path = os.path.join(base, APP_NAME)
-    os.makedirs(path, exist_ok=True)
-    return path
+    try:
+        os.makedirs(path, exist_ok=True)
+        return path
+    except OSError:
+        import tempfile
+        fallback = os.path.join(tempfile.gettempdir(), APP_NAME)
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
 
 
 def _settings_path():

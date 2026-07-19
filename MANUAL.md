@@ -692,12 +692,25 @@ Drive, OneDrive, etc.). The local save is already done — data is safe. You
 can navigate to other pages and keep working while the sync runs in the
 background.
 
-### Closing the app shows "Please wait" and won't close
+### Closing the app (or clicking "Back to start") shows "Please wait"
 
-A save or preview render is still finishing. This is deliberate: closing
-while either is in flight risked a corrupted `results.xlsx`/
-`annotated_review.pdf` or a crash. Wait a moment (these normally finish in
-well under a second to a few seconds) and try closing again.
+A save, preview render, or exam scan is still finishing. This is
+deliberate: closing or navigating away while any of those is in flight
+risked a corrupted `results.xlsx`/`annotated_review.pdf` or a crash (v1.8
+extended this to also cover an in-progress scan, not just review-screen
+saves/renders). Wait a moment — a scan takes as long as the exam has
+pages, a save/render normally finishes in well under a second to a few
+seconds — and try again.
+
+### "Multiple marks detected in the same ID-digit column" (v1.8)
+
+Shown when a DNI/U-number/etc. digit column has two different rows both
+clearly filled in — usually a student who marked one digit, changed their
+mind, and marked a different row in the same column without erasing the
+first. The app picks the more strongly-filled mark as its best guess but
+flags this rather than resolving it silently, since either mark could be
+the intended one. Check the page in the review screen and correct the
+field manually if the app's guess is wrong.
 
 ### "Export for student review request..." is greyed out, or shows an error
 

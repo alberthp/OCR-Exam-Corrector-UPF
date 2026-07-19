@@ -352,6 +352,12 @@ def detect_markers(gray):
     """
     h, w = gray.shape
     left = gray[:, :int(w*0.15)]
+    if left.size == 0:
+        # A degenerate (e.g. 1px-wide) input image leaves nothing in the
+        # marker strip -- cv2.threshold returns None on an empty array,
+        # which would otherwise raise TypeError a few lines down instead
+        # of the documented "not found" contract.
+        return None, None, None
     # Adaptive (Otsu) threshold instead of a fixed <30 cutoff: scan-to-scan
     # brightness noise can push a marker's darkest pixel from ~28 to ~32,
     # which silently zeroes out detection under a hardcoded threshold even
@@ -508,18 +514,18 @@ def calibrate_color_thresholds(img_bgr, id_y_range=None):
         'paper_reference': float      -- mean brightness of sampled paper pixels
     """
     h, w = img_bgr.shape[:2]
-    
+
     # Sample known dark pixels: left margin where markers are
     left_strip = img_bgr[:, :int(w*0.08), :]
     gray_left = cv2.cvtColor(left_strip, cv2.COLOR_BGR2GRAY)
     very_dark_mask = gray_left < 50
-    
+
     if very_dark_mask.sum() > 100:
         dark_pixels = left_strip[very_dark_mask]
         dark_brightness = dark_pixels.mean(axis=1).mean()
     else:
         dark_brightness = 30  # fallback
-    
+
     # Sample paper background: pixels far from any feature
     # Use the top-right corner area which is usually clean
     bg_strip = img_bgr[int(h*0.02):int(h*0.05), int(w*0.5):int(w*0.95), :]
@@ -529,12 +535,12 @@ def calibrate_color_thresholds(img_bgr, id_y_range=None):
         paper_brightness = gray_bg[paper_mask].mean()
     else:
         paper_brightness = 240  # fallback
-    
+
     # Adaptive brightness threshold: midpoint between dark and paper, biased toward dark
     # This accommodates light pencil marks while excluding light form pink
     brightness_threshold = int(dark_brightness + (paper_brightness - dark_brightness) * 0.55)
     brightness_threshold = max(120, min(200, brightness_threshold))
-    
+
     return {
         'brightness_threshold': brightness_threshold,
         'dark_reference': dark_brightness,
@@ -561,10 +567,10 @@ def make_student_mask(img_bgr, color_cal=None):
     rf = img_bgr[:,:,2].astype(float)
     brightness = img_bgr.mean(axis=2)
     red_dom = rf - (gf + bf) / 2
-    
+
     # Use adaptive threshold if provided, else use safe default
     bt = color_cal['brightness_threshold'] if color_cal else 170
-    
+
     # red_dom<40 (not 20): dark ink can pick up a slight red tint where it
     # overlaps the printed pink bubble outline (verified on a real mark that
     # was 89% excluded at <20 despite being unambiguously dark by brightness).
@@ -655,18 +661,30 @@ def read_digit_marker_anchored(mask, cx, id_rows, median_sp, w,
                                   fill_threshold=None):
     """Detect which digit (0-9) is filled in a single ID bubble column.
 
-    "Marker-anchored" means the result is only accepted if the detected ink
-    peak aligns with a known marker row (within 70% of the median spacing).
-    This prevents spurious reads from form lines, shadow artifacts, or ink
-    bleed in the gap between the ID and answer sections.
+    "Marker-anchored" means a peak is only accepted as a digit if it aligns
+    with a known marker row (within 45% of the median spacing). This prevents
+    spurious reads from form lines, shadow artifacts, or ink bleed in the gap
+    between the ID and answer sections -- notably the printed header artwork
+    that sits just above row 0 of every ID column, which the vertical strip
+    (y_margin extends 80% of a row above id_rows[0]) otherwise reaches into.
+    A real scan showed that artwork producing a peak with dist ~29-38px from
+    id_rows[0], clearly separated from genuine marks (dist <=12px on the same
+    dataset) -- the 45%-of-median_sp cutoff (~22px here) sits in that gap.
+    The tolerance used to be 70%, which let the artwork through: it was
+    close enough to id_rows[0] to be accepted, and on one real page the
+    artwork's peak was even *taller* than the student's actual mark, so it
+    won outright and silently misread the digit as 0 instead of 1.
 
     Strategy:
       1. Extract a vertical strip of the student mask covering the full ID row range.
       2. Project horizontally (mean across the strip's width) to get a 1-D fill profile.
-      3. Find the tallest peak in that profile.
-      4. Accept only if: peak fill >= fill_threshold AND the peak y aligns with
-         one of id_rows (distance < 0.7 * median_sp).
-      5. Return the 0-based index of the matching id_row as the digit value.
+      3. Walk peaks strongest-first; skip any that don't clear fill_threshold
+         or don't cleanly align with an id_row (a peak failing row-alignment
+         no longer ends the search -- it's discarded and the next-strongest
+         peak is tried, so a misaligned artifact can no longer mask a
+         genuine, slightly-weaker mark elsewhere in the column).
+      4. The first peak that clears both checks wins; its aligned id_row
+         index is the digit value.
 
     Args:
         mask: binary student mask (output of make_student_mask)
@@ -678,45 +696,66 @@ def read_digit_marker_anchored(mask, cx, id_rows, median_sp, w,
                         defaults to FILL_THRESHOLD_DIGIT if None
 
     Returns:
-        (digit, fill): digit is the row index (0-9) or None; fill is the peak
-        fill ratio (useful for adaptive threshold calibration even on None returns)
+        (digit, fill, ambiguous): digit is the row index (0-9) or None; fill
+        is the peak fill ratio (useful for adaptive threshold calibration
+        even on None returns); ambiguous is True when a *second*, distinct
+        row-aligned peak in this same column also clears fill_threshold --
+        i.e. the student appears to have marked two different digits in one
+        column. When ambiguous, digit is still the stronger of the two marks
+        (never None just because of the ambiguity), so existing callers that
+        only need a best-effort digit don't have to change; callers that
+        care about the ambiguity check the third value.
     """
     if fill_threshold is None:
         fill_threshold = FILL_THRESHOLD_DIGIT
-    
+
     y_margin = int(median_sp * 0.8)
     y_top = int(id_rows[0]) - y_margin
     y_bot = int(id_rows[-1]) + y_margin
     x1 = max(0, cx - BUBBLE_HALF_WIDTH)
     x2 = min(w, cx + BUBBLE_HALF_WIDTH)
     col_strip = mask[y_top:y_bot, x1:x2]
-    
+
     if col_strip.size == 0:
-        return None, 0
-    
+        return None, 0, False
+
     profile = uniform_filter1d(col_strip.mean(axis=1) / 255.0, size=5)
     peaks, props = find_peaks(
-        profile, height=0.03, 
+        profile, height=0.03,
         distance=int(median_sp * 0.4),
         prominence=0.015
     )
-    
+
     if len(peaks) == 0:
-        return None, float(profile.max())
-    
-    best_peak = peaks[np.argmax(props['peak_heights'])]
-    peak_y_abs = best_peak + y_top
-    peak_fill = float(profile[best_peak])
-    
-    # Reject as noise if the strongest "mark" is too weak
-    if peak_fill < fill_threshold:
-        return None, peak_fill
-    
-    dists = np.abs(id_rows - peak_y_abs)
-    if dists.min() < median_sp * 0.7:
-        return int(np.argmin(dists)), peak_fill
-    
-    return None, peak_fill
+        return None, float(profile.max()), False
+
+    heights = props['peak_heights']
+    order = np.argsort(heights)[::-1]  # strongest peak first
+    row_tolerance = median_sp * 0.45
+
+    candidates = []  # [(row_index, fill), ...] in descending fill order
+    for i in order:
+        fill = float(heights[i])
+        if fill < fill_threshold:
+            break  # descending order, none after this qualify either
+        dists = np.abs(id_rows - (peaks[i] + y_top))
+        if dists.min() < row_tolerance:
+            candidates.append((int(np.argmin(dists)), fill))
+
+    if not candidates:
+        return None, float(profile.max()), False
+
+    digit, peak_fill = candidates[0]
+
+    # Confirmed against a real scan: a student can genuinely mark two rows
+    # in the same ID-digit column (e.g. a corrected/re-marked digit where
+    # the original mark wasn't erased) -- picking the stronger peak and
+    # saying nothing meant that got silently resolved as if there were no
+    # ambiguity at all. Any other candidate aligned with a *different*
+    # row makes this column ambiguous.
+    ambiguous = any(row != digit for row, _ in candidates[1:])
+
+    return digit, peak_fill, ambiguous
 
 
 def get_column_peak_fill(mask, cx, id_rows, median_sp, w):
@@ -1150,13 +1189,31 @@ def process_page(img_pil, page_num, num_questions, num_options=5, source_dpi=300
     }
     
     raw_fields = {}
+    ambiguous_id_columns = []  # [(field_name, 0-based column index), ...]
     for fname, cols in fields.items():
         digits = []
-        for c in cols:
-            d, _ = read_digit_marker_anchored(mask, c + x_offset, id_rows, median_sp, w,
-                                                fill_threshold=adaptive_threshold)
+        for ci, c in enumerate(cols):
+            d, _, ambiguous = read_digit_marker_anchored(
+                mask, c + x_offset, id_rows, median_sp, w, fill_threshold=adaptive_threshold)
             digits.append(d)
+            if ambiguous:
+                ambiguous_id_columns.append((fname, ci))
         raw_fields[fname] = digits
+
+    if ambiguous_id_columns:
+        # Appended to the SAME list the box-validation issues above use
+        # (result['validation_issues'], already set by Step 5e, which runs
+        # before this) -- that's what the annotated PDF's WARNINGS footer
+        # actually reads (result['errors'] is a different list and isn't
+        # shown there). A column with two marked rows still picks the
+        # stronger mark (never silently dropped to None) but is flagged
+        # rather than resolved without a trace, matching this project's
+        # "flag ambiguity, don't guess silently" rule elsewhere
+        # (GRUP_Check, decode_identifier's AMBIGUOUS/WARNING statuses).
+        cols_desc = ", ".join(f"{fname} col{ci}" for fname, ci in ambiguous_id_columns)
+        msg = f"Multiple marks detected in the same ID-digit column: {cols_desc}"
+        result['validation_issues'].append(msg)
+        result['errors'].append(msg)
     
     # Decode
     result['dni'] = ''.join(str(d) if d is not None else '_' for d in raw_fields['DNI'])
@@ -2123,8 +2180,8 @@ def _draw_annotated_page(c, r, student_lookup, page_w_pt, page_h_pt,
                      REF_PARCIAL_X, REF_PERMUT_X, REF_GRUP_X, REF_ID_X]:
             for ci, col in enumerate(cols):
                 cx = col + x_offset
-                d, _ = read_digit_marker_anchored(mask_arr, cx, id_rows,
-                                                   median_sp, mask_arr.shape[1])
+                d, _, _ambiguous = read_digit_marker_anchored(mask_arr, cx, id_rows,
+                                                                median_sp, mask_arr.shape[1])
                 if d is not None:
                     # Find the actual y of this bubble (using the same logic
                     # that decided it was detected)

@@ -20,6 +20,14 @@ if PROJECT_ROOT not in sys.path:
 import omr_correct as omr  # noqa: E402
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--packaged-exe", action="store", default=None,
+        help="Path to a frozen e2e_driver.exe for test_stability_packaged_exe.py "
+             "(see that file's module docstring for how to build one)",
+    )
+
+
 @pytest.fixture(scope="session")
 def qapp():
     """One QApplication for the whole test session -- PySide6 forbids

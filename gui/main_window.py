@@ -60,7 +60,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.review_screen)
 
     def closeEvent(self, event):
-        """Block closing while a save or preview render is still in flight.
+        """Block closing while a save, preview render, or exam scan is still in flight.
 
         Nothing previously waited for review_screen's background QThreads
         (_SaveWorker / _PreviewRenderWorker) before the process could exit.
@@ -73,14 +73,22 @@ class MainWindow(QMainWindow):
         operations normally finish in well under a second (a save) to a
         few seconds (a page render), so asking the user to try again a
         moment later is a minor inconvenience next to the alternative.
+
+        new_exam_screen's AnalysisWorker is the same shape of hazard (a
+        live QThread the window doesn't otherwise wait for) and was
+        missing from this guard entirely -- a stability test driving a
+        real running AnalysisWorker confirmed closing was never blocked
+        during a scan, until this check was added.
         """
         rs = self.review_screen
         busy = rs._local_busy or bool(rs._pending_sync_workers) or bool(rs._pending_preview_workers)
-        if busy:
+        scan_worker = getattr(self.new_exam_screen, 'worker', None)
+        scanning = scan_worker is not None and scan_worker.isRunning()
+        if busy or scanning:
             QMessageBox.information(
                 self, "Please wait",
-                "A save or preview render is still finishing. Please wait "
-                "a moment and try closing again.")
+                "A save, preview render, or exam scan is still finishing. "
+                "Please wait a moment and try closing again.")
             event.ignore()
             return
         event.accept()

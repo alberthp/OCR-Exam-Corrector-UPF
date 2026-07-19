@@ -265,6 +265,22 @@ class ReviewScreen(QWidget):
     # very long exam can't grow memory unboundedly; oldest entry evicted first.
     PREVIEW_CACHE_SIZE = 30
 
+    # Caps how many _PreviewRenderWorker threads (each spawning its own
+    # poppler subprocess against the same PDF) can be in flight at once.
+    # Found by bisection: rapid, zero-delay page navigation reproduced a
+    # native STATUS_STACK_BUFFER_OVERRUN crash once 6+ concurrent preview
+    # renders were in flight (5 concurrent never crashed across repeated
+    # trials; 6+ crashed with meaningful, non-deterministic probability --
+    # the signature of a genuine race, not a hard resource limit). Capping
+    # at 2 leaves a large safety margin while still overlapping renders
+    # for perceived responsiveness. A request that arrives over the cap
+    # isn't dropped: _preview_request_idx already holds the latest desired
+    # page, and _maybe_start_preview_worker() re-checks it every time a
+    # slot frees up, so fast repeated navigation naturally skips straight
+    # to wherever the user actually stopped instead of rendering every
+    # intermediate page.
+    PREVIEW_WORKER_CAP = 2
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._base_pixmap = None
@@ -762,8 +778,30 @@ class ReviewScreen(QWidget):
         self.preview_label.setText("Loading preview...")
         self.zoom_label.setText("-")
         self._preview_request_idx = pdf_idx
+        self._maybe_start_preview_worker()
 
-        worker = _PreviewRenderWorker(self.pdf_path, pdf_idx, self.PREVIEW_DPI)
+    def _maybe_start_preview_worker(self):
+        """Starts rendering _preview_request_idx if it isn't already cached,
+        isn't already in flight, and we're under PREVIEW_WORKER_CAP.
+
+        Called both when a page is newly requested and whenever an
+        existing worker finishes, so a request that arrived while at
+        capacity gets picked up as soon as a slot frees -- always for
+        whatever _preview_request_idx currently holds, which is the most
+        recently requested page. Fast repeated navigation (many pages
+        flipped through before any one render finishes) naturally lands
+        on wherever the user actually stopped instead of queueing and
+        rendering every intermediate page.
+        """
+        idx = self._preview_request_idx
+        if idx is None or idx in self._preview_cache:
+            return
+        if any(w.pdf_idx == idx for w in self._pending_preview_workers):
+            return  # already in flight
+        if len(self._pending_preview_workers) >= self.PREVIEW_WORKER_CAP:
+            return  # at capacity -- retried from _on_preview_rendered once a slot frees
+
+        worker = _PreviewRenderWorker(self.pdf_path, idx, self.PREVIEW_DPI)
         worker.done.connect(self._on_preview_rendered)
         self._pending_preview_workers.append(worker)
         worker.start()
@@ -773,23 +811,41 @@ class ReviewScreen(QWidget):
             if worker_sender in self._pending_preview_workers:
                 self._pending_preview_workers.remove(worker_sender)
 
-        # The user may have navigated to a different page while this was
-        # rendering -- discard a result that no longer matches what's asked.
-        if pdf_idx != self._preview_request_idx:
-            return
+        try:
+            # The user may have navigated to a different page while this
+            # was rendering -- discard a result that no longer matches
+            # what's asked.
+            if pdf_idx != self._preview_request_idx:
+                return
 
-        if err:
-            self.preview_label.setText(f"Could not render preview:\n{err}")
-            return
+            if err:
+                self.preview_label.setText(f"Could not render preview:\n{err}")
+                return
 
-        pixmap = QPixmap.fromImage(qimage)
-        if len(self._preview_cache) >= self.PREVIEW_CACHE_SIZE:
-            self._preview_cache.pop(next(iter(self._preview_cache)))
-        self._preview_cache[pdf_idx] = pixmap
+            pixmap = QPixmap.fromImage(qimage)
+            if len(self._preview_cache) >= self.PREVIEW_CACHE_SIZE:
+                self._preview_cache.pop(next(iter(self._preview_cache)))
+            self._preview_cache[pdf_idx] = pixmap
 
-        self.preview_label.setText('')
-        self._base_pixmap = pixmap
-        self._zoom_fit()
+            self.preview_label.setText('')
+            self._base_pixmap = pixmap
+            self._zoom_fit()
+        finally:
+            # A capacity slot just freed up -- pick up a newer request if
+            # one is waiting. Only when the target has actually moved on
+            # to a different page than this worker just handled: calling
+            # this unconditionally re-triggers _maybe_start_preview_worker()
+            # for the SAME page whenever this render failed (err set, so
+            # nothing got cached) -- confirmed by testing to loop forever
+            # against a page that will deterministically keep failing for
+            # the same reason, since a failed render is never cached and
+            # so never satisfies _maybe_start_preview_worker()'s "already
+            # resolved" check. On success the just-rendered page is cached
+            # already (nothing to retry); on failure the error is already
+            # shown and blindly retrying the identical request accomplishes
+            # nothing but a hang.
+            if self._preview_request_idx != pdf_idx:
+                self._maybe_start_preview_worker()
 
     # ----- Zoom controls -----
 

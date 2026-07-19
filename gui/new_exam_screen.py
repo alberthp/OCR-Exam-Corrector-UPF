@@ -319,7 +319,7 @@ class NewExamScreen(QWidget):
 
         top_row = QHBoxLayout()
         back_btn = QPushButton("<< Back to start")
-        back_btn.clicked.connect(self.back_requested.emit)
+        back_btn.clicked.connect(self._on_back_clicked)
         top_row.addWidget(back_btn)
         top_row.addStretch()
         layout.addLayout(top_row)
@@ -450,6 +450,30 @@ class NewExamScreen(QWidget):
         return group
 
     # ----- Actions -----
+
+    def _on_back_clicked(self):
+        """Block navigating away from an in-progress scan.
+
+        Previously unguarded: clicking Back while self.worker was still
+        running switched the visible screen immediately but did nothing
+        to the background AnalysisWorker, which kept running. When it
+        later finished, finished_run still fired and forced a jump to the
+        Review screen regardless of where the user had navigated to in
+        the meantime -- confirmed by testing to be a genuine, reachable
+        state (not just a theoretical race), and structurally the same
+        "a live QThread the window doesn't wait for" hazard closeEvent
+        guards against, just on the back-navigation path instead of the
+        close path. Mirrors that same fix: block, tell the user why, let
+        the run finish (which already auto-navigates to Review on
+        success).
+        """
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(
+                self, "Please wait",
+                "The exam scan is still running. Please wait for it to "
+                "finish before going back.")
+            return
+        self.back_requested.emit()
 
     def _run_analysis(self):
         pdf = self.pdf_row.text()

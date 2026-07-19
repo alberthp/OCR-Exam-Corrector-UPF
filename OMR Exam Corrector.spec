@@ -31,7 +31,12 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,
+    # Windowed, not console: a console window next to the GUI mainly caught
+    # unhandled Python exceptions, but most already surface as proper
+    # dialogs in the app itself, and it's no help at all against a native
+    # crash (those bypass Python entirely -- see the v1.7 stability fix,
+    # diagnosed via the Windows Event Log instead, not this console).
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

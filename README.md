@@ -87,12 +87,18 @@ PATH — see [INSTALL.md](INSTALL.md) for platform-specific instructions.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                        # everything, including a real OCR pass (~1 min)
-pytest -m "not integration"   # fast unit/GUI suite only (~14s, no real exam data needed)
+pytest                        # everything, including a real OCR pass (~2.5 min)
+pytest -m "not integration"   # fast unit/GUI suite only (~19s, no real exam data needed)
+pytest -m packaging --packaged-exe <path>   # opt-in: drives an already-built frozen .exe
 ```
 
-169 tests, organized around every bug class found in past review passes —
-see [TEST_SUITE.md](TEST_SUITE.md) for the full design and latest results.
+214 tests, organized around every bug class found in past review passes,
+plus a dedicated stability suite (malformed input, real thread lifecycle,
+a packaged-.exe smoke test) — see [TEST_SUITE.md](TEST_SUITE.md) for the
+full design and latest results. **v1.8: all tests passing** (206/206
+runnable, 8 self-skip for absent private data), including the opt-in
+packaged-`.exe` smoke test verified clean against the actual release
+binary immediately before tagging.
 
 ## Standalone Windows executable
 
@@ -142,6 +148,72 @@ Three things worth knowing when building or distributing it:
   matching backend module too, or "Email settings..." fails in the frozen
   build with "No recommended backend was available" despite working fine
   from source.
+
+## What's new in v1.8
+
+- **Fixed a wrong-digit misread caused by printed header artwork**: a
+  real scan showed a genuine student mark (row 1 of an ID column)
+  silently losing out to the printed decorative artwork sitting just
+  above row 0 of every ID column — on a faint enough scan, that artwork's
+  peak could actually outscore the real mark and get returned as the
+  digit. `read_digit_marker_anchored()`'s row-alignment tolerance is
+  tightened (70%→45% of row spacing) and now falls through to the next-
+  best candidate instead of giving up when the top peak is misaligned.
+  Confirmed fix on the real page that reported it: `049700` → `149700`.
+  A second, genuine case (a student marking two different rows in one
+  column) is now surfaced as a "Multiple marks detected" warning instead
+  of being silently resolved.
+- **Stability fixes for two real close/navigation gaps**: closing the
+  app while an exam scan was still running was never guarded (only
+  review-screen saves/renders were) — the same class of hazard that
+  caused a confirmed native crash previously. Clicking "Back to start"
+  during a running scan had the same gap on the navigation side, plus a
+  worse symptom: the background scan would finish later and forcibly
+  jump the user to the Review screen regardless of where they'd
+  navigated to since. Both now block with a "please wait" message,
+  mirroring the existing review-screen guard.
+- **`_config_dir()` now falls back gracefully** instead of raising a raw,
+  unhandled exception out of "Email settings..." or "Send by email" if
+  the per-user config directory can't be created (e.g. a locked-down
+  `APPDATA` in a managed environment) — falls back to a system-temp
+  location rather than breaking the feature outright.
+- **New stability test suite** (`tests/test_stability_*.py`, ~40 new
+  tests): malformed/adversarial input handling (corrupt PDFs/Excel/CSV,
+  pathological images, locked output files), real `QThread` lifecycle
+  (not mocked busy-flags), a static guard against the exact import
+  mistake that caused the v1.6 native crash, a real subprocess
+  end-to-end run (New Exam → scan → Review → close) with a memory-growth
+  regression check, and a new opt-in packaged-`.exe` smoke test that
+  builds and drives the actual frozen binary (not just source) through
+  the same full lifecycle — the only test technique that can catch a
+  packaging-specific regression at all. Also fixed a related bug this
+  work turned up: `detect_markers()` threw an unhandled `TypeError` on a
+  degenerate (e.g. 1px-wide) input image instead of its documented
+  "not found" contract.
+- **Fixed a real native crash from rapid Review-page navigation**: while
+  building the packaged-`.exe` smoke test above, one run hit a
+  `STATUS_STACK_BUFFER_OVERRUN` (the same signature as the v1.6 crash)
+  during review-page navigation. Unlike v1.6, this one didn't reproduce
+  from a plain scripted run — it took a dedicated stress test firing page
+  navigation back-to-back with no delay, which then reproduced it
+  reliably. Root cause: navigation is only gated by whether a *save* is in
+  progress, not by pending preview renders, so fast repeated navigation
+  could spawn many concurrent `_PreviewRenderWorker` threads — each
+  launching its own poppler subprocess against the same PDF file.
+  Bisecting on real data pinned the threshold exactly: 5 concurrent
+  renders never crashed across repeated trials, 6+ crashed with real,
+  non-deterministic probability — the signature of a genuine race, not
+  environmental noise. Fixed by capping concurrent preview-render workers
+  (`PREVIEW_WORKER_CAP = 2`) and re-checking the current target reactively
+  once a slot frees, rather than firing a new worker on every navigation
+  call. Two more bugs surfaced and got fixed while building that fix: a
+  worker could spawn a spurious duplicate for the page it had *just*
+  finished (checking the cache before it was actually written), and a
+  failed render could retry the same failing page forever (a failure is
+  never cached, so it never looked "already resolved"). Verified clean
+  across every reproduction attempt that previously crashed reliably, in
+  both the packaged `.exe` and from source — see TEST_SUITE.md's
+  "Packaged-.exe smoke test" section for the full investigation.
 
 ## What's new in v1.7
 
@@ -285,9 +357,13 @@ gui/
   review_screen.py          page-by-page review/correction screen
   email_dialogs.py          email settings + send-preview dialogs
   main_window.py            wires the three screens together
-tests/                     pytest suite (169 tests) -- see TEST_SUITE.md
+tests/                     pytest suite (214 tests, all passing) -- see TEST_SUITE.md
   conftest.py                shared fixtures (synthetic data only)
   test_*.py                  one file per module/concern
+  test_stability_*.py        crash-resistance: malformed input, real thread
+                              lifecycle, packaged-.exe smoke test
+  _e2e_driver.py              not a test file -- entry point for the
+                              subprocess/packaged-.exe end-to-end tests
 assets/
   upf_logo.png              logo shown on the start screen
   screenshots/              screenshots embedded in MANUAL.md
