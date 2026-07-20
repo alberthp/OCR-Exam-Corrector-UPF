@@ -236,6 +236,69 @@ From the command line, the same check runs automatically and the tool
 suggested fixes; pass `--ignore-answer-key-warnings` to proceed anyway (see
 [INSTALL.md](INSTALL.md) for the full CLI reference).
 
+### 5.1 Partial-credit worked examples
+
+The formula in [INSTALL.md §6](INSTALL.md#6-partial-credit-scoring-formula)
+is easiest to see with real numbers. `examples/answers_scan_example.csv`
+(20 questions, options A–D) and `examples/scanned_exam_example.pdf` (an
+invented student, "Albert Einstein", filling in the real blank template
+by hand) are graded together in
+[`examples/`](../examples/README.md#the-scanned-exam-example) specifically
+to exercise every scoring case at once. Recap: for a question with **G**
+correct options out of **N** total, each correct mark is worth `+1/G`,
+each incorrect mark costs `−1/(N−G)`, and the question's score is capped
+at 0 (never negative).
+
+| Question | Correct options | Student marked | Score | Why |
+| -------- | ---------------- | --------------- | ----- | --- |
+| Q1 | B | B | 1.0 | Exactly right. |
+| Q2 | A, B | A, B | 1.0 | Both options of a multi-answer question, nothing else. |
+| Q3 | D | B, D | 0.667 | D correct (+1) minus one wrong mark B (−1/3, N=4, G=1). |
+| Q9 | B | A, B, D | 0.333 | One correct (+1) minus two wrong marks A and D (−1/3 each). |
+| Q14 | B, D | B | 0.5 | Only one of the two correct options marked: +1/2, nothing subtracted. |
+| Q15 | C | *(blank)* | 0 | Leaving a question blank always scores 0 — never negative. |
+| Q16 | C | A, D | 0 | Two wrong marks (−1/3 each = −0.667) with no correct one; capped at 0 rather than going negative. |
+| Q19 | A, B | A, C | 0 | One correct (+1/2) cancelled by one wrong (−1/2, N=4, G=2). |
+| Q20 | A, B, C | A, C | 0.667 | Two of the three correct options (+1/3 each), nothing else marked. |
+
+Total across all 20 questions: 13.167 correct-equivalent → **6.58/10** on
+the page's `Grade_10` column.
+
+### 5.2 The "marked an option that doesn't exist" case
+
+The physical bubble-sheet template has 5 answer rows (A–E), but this
+exam's answer key only defines 4 (A–D) — the fifth row simply isn't used.
+On question 11 of `scanned_exam_example.pdf`, the student filled bubble
+**C** (the correct answer) *and* bubble **E**. What happens to that stray
+E mark depends entirely on **Options per question** ([4.2](#42-set-exam-parameters)):
+
+- **Configured correctly, 4 options** (matching the answer key): the E
+  bubble sits outside the 4 columns the app reads for this exam at all —
+  it's never scanned, never appears in the review grid, and Q11 scores a
+  clean **1.0**. This is the safe configuration whenever your answer key
+  doesn't use every row the physical template offers.
+- **Misconfigured, 5 options** (matching the template's row count, not
+  the key): the E bubble *is* now read, but the answer key has no `E`
+  column for any question, which is exactly the
+  [answer-key validation](#5-answer-key-validation-v14) warning from
+  above. Proceeding anyway ("Continue Anyway" or
+  `--ignore-answer-key-warnings`), the E mark is scored as *always
+  wrong* — Q11 drops from 1.0 to **0.75**, even though C, the actually
+  correct answer, is still marked.
+
+  This isn't confined to Q11: reading one extra option column changes
+  **N** in the scoring formula for *every* question, not just the one
+  with the stray mark — Albert Einstein's overall grade actually comes
+  out slightly *higher* under this misconfiguration (13.333/20 →
+  6.67/10), because the wider N softens the wrong-mark penalty
+  everywhere else, even though Q11 itself got worse. Getting **Options
+  per question** right isn't just about one stray bubble — it shifts the
+  grading curve for the whole exam.
+
+**Takeaway:** always set **Options per question** to the number of
+options your answer key actually defines, not the number of rows the
+physical template happens to have.
+
 ---
 
 ## 6. Review screen — navigating results
@@ -777,37 +840,28 @@ hand if the scan is wrong.
 
 ---
 
-## Appendix — Screenshots needed
+## Appendix — Screenshots
 
-> The screenshots below need to be captured from the running application and
-> saved to `assets/screenshots/` with the exact filenames listed.
-> `01`–`04`, `06`, and `11` were captured programmatically for v1.4 (via
-> `QWidget.grab()`, driving the real app with real data — not mockups). The
-> remaining ones need a manual capture: `05`/`07`/`08`/`10` are precise crops
-> of a running window (not automated this round), and `09` needs a real
-> native "Save File" dialog and its resulting PDF, which can't be captured
-> by grabbing a Qt widget at all.
->
-> **⚠️ Known issue**: `04-review-screen.png` and `06-expected-overlay.png`
-> were captured against a real student's data and show their actual name,
-> DNI, and U-number in plain text — this contradicts the project's "don't
-> push real data" policy. They should be regenerated from fully synthetic
-> data once `examples/scanned_exam_example.pdf` exists — see
-> [`todo_albert.md`](todo_albert.md) at the project root for what's needed
-> to unblock that (also covers the remaining 5 screenshots below, which
-> need a *loaded page* to mean anything and currently have no synthetic
-> source to load one from).
+> All screenshots are captured programmatically (via `QWidget.grab()`,
+> driving the real app — not mockups) and saved to `assets/screenshots/`.
+> `04`–`10` are generated from
+> [`examples/scanned_exam_example.pdf`](../examples/README.md#the-scanned-exam-example)
+> (the invented "Albert Einstein" exam) by
+> [`tools/capture_manual_screenshots.py`](../tools/capture_manual_screenshots.py) —
+> re-run that script after a UI change to regenerate all seven at once. It
+> needs a real (non-offscreen) Qt platform to render text correctly, so run
+> it interactively on a desktop session, not headless CI.
 
-| File | Screen | What to show | Status |
+| File | Screen | What it shows | Status |
 | ------ | -------- | ----------- | ------ |
-| `01-start-screen.png` | Start | Full window at launch, both main buttons visible, footer showing the current version. | ⚠️ footer still reads v1.4, now stale (app is v1.5) — otherwise fine, no PII |
-| `02-new-exam-form.png` | New exam | Form with all four file fields filled in, before clicking Run — should also show the new **Exam type** field (v1.5) in Exam parameters. | ⬜ stale: predates the Exam type field |
+| `01-start-screen.png` | Start | Full window at launch, both main buttons visible, footer showing the current version. | ⚠️ footer still reads v1.4, now stale (app is v1.8) — otherwise fine, no PII |
+| `02-new-exam-form.png` | New exam | Form with all four file fields filled in, before clicking Run. | ⬜ stale: predates the Exam type field (v1.5) |
 | `03-analysis-running.png` | New exam | Mid-run: progress bar partially filled, several rows in the table. | ✅ current (no PII) |
-| `04-review-screen.png` | Review | Full window with an annotated page loaded, overlay **off**, Score column visible, and the new search box (v1.5) above the Pages table. | ⚠️ shows real student PII AND predates the search box — needs regenerating, see note above |
-| `05-correction-panel.png` | Review | Right panel close-up: fields in order (U-Number, DNI, Group, Partial, Permutation, Exam type), Email field, answer grid visible. | ⬜ needs synthetic scan, see `todo_albert.md` |
-| `06-expected-overlay.png` | Review | Same page as `04` but **"Show expected answers" toggled on** (blue slashes visible). | ⚠️ shows real student PII — needs regenerating, see note above |
-| `07-legend.png` | Review | Crop of the legend strip at the bottom of the preview panel. | ⬜ needs synthetic scan, see `todo_albert.md` |
-| `08-export-button.png` | Review | Right panel close-up showing the **"Export for student review request..."** button, plus the save dialog it opens with the suggested filename visible. | ⬜ needs synthetic scan, see `todo_albert.md` |
-| `09-export-pdf-pages.png` | Exported PDF | Both pages of one exported student-review PDF side by side (or stacked): page 1 the plain scan, page 2 the annotated page with the expected-answers overlay and legend visible in the footer. | ⬜ needs synthetic scan, see `todo_albert.md` |
-| `10-answer-grid-colours.png` | Review | Close-up of the answer grid showing a plain (auto-detected) mark, an **orange** unsaved toggle, a **bold purple** saved manual mark, and a **dark grey** expected-correct cell all at once if possible. | ⬜ needs synthetic scan, see `todo_albert.md` |
+| `04-review-screen.png` | Review | Full window with Albert Einstein's page loaded, overlay **off**, Score column and search box visible. | ✅ synthetic data only |
+| `05-correction-panel.png` | Review | Right panel close-up: fields in order (U-Number, DNI, Group, Partial, Permutation, Exam type), Email field, answer grid visible. | ✅ synthetic data only |
+| `06-expected-overlay.png` | Review | Same page as `04` but **"Show expected answers" toggled on** (blue slashes visible). | ✅ synthetic data only |
+| `07-legend.png` | Review | Crop of the legend strip at the bottom of the preview panel. | ✅ synthetic data only |
+| `08-export-button.png` | Review | Right panel close-up showing the **"Export for student review request..."** button, plus the save dialog it opens with the suggested filename visible. | ✅ synthetic data only |
+| `09-export-pdf-pages.png` | Exported PDF | Both pages of one exported student-review PDF side by side: page 1 the plain scan, page 2 the annotated page with the expected-answers overlay and legend visible in the footer. | ✅ synthetic data only |
+| `10-answer-grid-colours.png` | Review | Close-up of the answer grid (question 5) showing a plain auto-detected mark (B), a fresh **orange** unsaved toggle (A), a **bold purple** saved manual mark (C), and a **dark grey** expected-correct cell (D) all at once. | ✅ synthetic data only |
 | `11-answer-key-validation.png` | New exam | The answer-key validation dialog (v1.4) showing at least one issue with a suggested fix. | ✅ current (no PII — synthetic-looking dialog, no student data shown) |
