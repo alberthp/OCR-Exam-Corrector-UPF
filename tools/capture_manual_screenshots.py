@@ -11,6 +11,7 @@ Run from the project root:
 
 Writes into assets/screenshots/:
     01-start-screen.png
+    02-new-exam-form.png
     04-review-screen.png
     05-correction-panel.png
     06-expected-overlay.png
@@ -152,6 +153,21 @@ def main():
     app.processEvents()
     grab(start, os.path.join(OUT_DIR, "01-start-screen.png"))
     start.close()
+
+    # ----- 02: new exam form, all four required fields filled (incl. Exam type, v1.5) -----
+    from gui.new_exam_screen import NewExamScreen
+    new_exam = NewExamScreen()
+    new_exam.resize(1300, 850)
+    new_exam.pdf_row.setText(os.path.join("examples", "scanned_exam_example.pdf"))
+    new_exam.students_row.setText(os.path.join("examples", "students_standard_example.csv"))
+    new_exam.answers_row.setText(os.path.join("examples", "answers_scan_example.csv"))
+    new_exam.questions_spin.setValue(20)
+    new_exam.options_spin.setValue(4)
+    new_exam.exam_type_combo.setCurrentText("Final")
+    new_exam.show()
+    app.processEvents()
+    grab(new_exam, os.path.join(OUT_DIR, "02-new-exam-form.png"))
+    new_exam.close()
 
     from gui.review_screen import ReviewScreen
 
