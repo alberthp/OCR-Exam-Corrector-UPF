@@ -12,6 +12,7 @@ Run from the project root:
 Writes into assets/screenshots/:
     01-start-screen.png
     02-new-exam-form.png
+    03-analysis-running.png
     04-review-screen.png
     05-correction-panel.png
     06-expected-overlay.png
@@ -23,6 +24,7 @@ Writes into assets/screenshots/:
 import os
 import sys
 import tempfile
+import time
 
 # Deliberately NOT forcing QT_QPA_PLATFORM=offscreen here (unlike the test
 # suite's qapp fixture): the offscreen platform plugin doesn't pick up any
@@ -144,6 +146,7 @@ def main():
     app = QApplication.instance() or QApplication([])
 
     os.makedirs(OUT_DIR, exist_ok=True)
+    scratch_dir = tempfile.mkdtemp(prefix="omr_screenshots_")
 
     # ----- 01: start screen (mainly so the version in the footer can't go stale) -----
     from gui.start_screen import StartScreen
@@ -169,9 +172,55 @@ def main():
     grab(new_exam, os.path.join(OUT_DIR, "02-new-exam-form.png"))
     new_exam.close()
 
+    # ----- 03: analysis running (mid-run progress + live per-page table) -----
+    # The previous version of this screenshot was captured against a real
+    # exam and showed real students' names/DNI/U-numbers -- replaced here by
+    # running the real pipeline against a synthetic PDF built by repeating
+    # the one invented page several times, so the live table has more than
+    # one row without any real data anywhere.
+    from pypdf import PdfReader, PdfWriter
+    reader = PdfReader(os.path.join(EXAMPLES_DIR, "scanned_exam_example.pdf"))
+    writer = PdfWriter()
+    for _ in range(7):
+        writer.add_page(reader.pages[0])
+    multi_page_pdf = os.path.join(scratch_dir, "multi_page_demo.pdf")
+    with open(multi_page_pdf, "wb") as f:
+        writer.write(f)
+
+    run_screen = NewExamScreen()
+    run_screen.resize(1300, 850)
+    run_screen.pdf_row.setText(multi_page_pdf)
+    run_screen.students_row.setText(os.path.join("examples", "students_standard_example.csv"))
+    run_screen.answers_row.setText(os.path.join("examples", "answers_scan_example.csv"))
+    run_screen.questions_spin.setValue(20)
+    run_screen.options_spin.setValue(4)
+    run_screen.exam_type_combo.setCurrentText("Final")
+    run_screen.show()
+    app.processEvents()
+
+    captured = {}
+
+    def _capture_mid_run(current, total, info):
+        if current == 4 and "done" not in captured:
+            captured["done"] = True
+            app.processEvents()
+            grab(run_screen, os.path.join(OUT_DIR, "03-analysis-running.png"))
+
+    run_screen._run_analysis()
+    run_screen.worker.page_done.connect(_capture_mid_run)
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+        if captured and (run_screen.worker is None or not run_screen.worker.isRunning()):
+            break
+    else:
+        raise AssertionError("analysis run for screenshot 03 never finished")
+    run_screen.close()
+    assert "done" in captured, "never reached page 4/7 to capture screenshot 03"
+
     from gui.review_screen import ReviewScreen
 
-    scratch_dir = tempfile.mkdtemp(prefix="omr_screenshots_")
     run_state = build_run_state(scratch_dir)
 
     screen = ReviewScreen()
