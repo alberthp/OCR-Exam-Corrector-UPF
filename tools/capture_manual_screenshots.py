@@ -10,6 +10,7 @@ Run from the project root:
     python tools/capture_manual_screenshots.py
 
 Writes into assets/screenshots/:
+    01-start-screen.png
     04-review-screen.png
     05-correction-panel.png
     06-expected-overlay.png
@@ -140,6 +141,17 @@ def stack_images_horizontally(paths, out_path, gap=16, bg=(255, 255, 255)):
 
 def main():
     app = QApplication.instance() or QApplication([])
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+
+    # ----- 01: start screen (mainly so the version in the footer can't go stale) -----
+    from gui.start_screen import StartScreen
+    start = StartScreen()
+    start.resize(1300, 850)
+    start.show()
+    app.processEvents()
+    grab(start, os.path.join(OUT_DIR, "01-start-screen.png"))
+    start.close()
 
     from gui.review_screen import ReviewScreen
 
